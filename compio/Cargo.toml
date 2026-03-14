@@ -83,12 +83,12 @@ signal = ["dep:compio-signal", "runtime"]
 time = ["compio-runtime/time", "runtime"]
 dispatcher = ["dep:compio-dispatcher", "runtime"]
 tls = ["dep:compio-tls"]
-native-tls = ["tls", "compio-tls/native-tls", "compio-ws?/native-tls", "compio-h2?/tls"]
+native-tls = ["tls", "compio-tls/native-tls", "compio-ws?/native-tls", "compio-h2?/native-tls"]
 native-tls-vendored = [
     "compio-tls/native-tls-vendored",
     "compio-ws?/native-tls-vendored",
 ]
-rustls = ["tls", "compio-tls/rustls", "compio-ws?/rustls", "compio-h2?/tls"]
+rustls = ["tls", "compio-tls/rustls", "compio-ws?/rustls", "compio-h2?/rustls"]
 ring = ["tls", "compio-tls/ring", "compio-quic?/ring", "compio-ws?/ring"]
 py-dynamic-openssl = ["tls", "compio-tls/py-dynamic-openssl"]
 process = ["dep:compio-process"]

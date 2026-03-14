@@ -145,6 +145,13 @@ mod tests {
     }
 
     #[test]
+    fn test_non_padded_flow_controlled_len() {
+        let frame = Data::decode(StreamId::new(1), 0, Bytes::from_static(b"hello")).unwrap();
+        assert_eq!(frame.flow_controlled_len(), 5);
+        assert_eq!(frame.payload().len(), 5);
+    }
+
+    #[test]
     fn test_padded_flow_controlled_len() {
         // Build a padded DATA frame payload:
         // [pad_len=3] [data: "hi"] [padding: 0,0,0]

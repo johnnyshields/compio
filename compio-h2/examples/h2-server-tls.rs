@@ -5,8 +5,8 @@
 ///
 /// Environment variables:
 ///   H2_PORT                   — listen port (default 8443)
-///   H2_CERT_PATH              — path to PEM certificate (default: generates self-signed)
-///   H2_KEY_PATH               — path to PEM private key  (default: generates self-signed)
+///   H2_IDENTITY_PATH          — path to PKCS#12 identity file (.p12)
+///   H2_IDENTITY_PASS          — password for the PKCS#12 file (default: empty)
 ///   H2_MAX_CONCURRENT_STREAMS — max concurrent streams (default 100)
 ///   H2_INITIAL_WINDOW_SIZE    — initial window size in bytes (default 65535)
 ///
