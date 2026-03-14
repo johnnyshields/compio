@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use bytes::Bytes;
 use compio_h2::{ClientBuilder, ServerBuilder};
 
 mod common;
@@ -675,4 +676,52 @@ async fn max_frame_size_propagated_to_reader() {
     timeout
         .await
         .expect("max_frame_size_propagated_to_reader timed out");
+}
+
+#[compio_macros::test]
+async fn max_send_buffer_size_enforced() {
+    // Verify that send_data rejects when pending bytes exceed max_send_buffer_size.
+    // Strategy: use a tiny initial window on the server side so the client's stream
+    // send window is small. Then send more data than fits in both the window and
+    // the send buffer.
+    let timeout = compio_runtime::time::timeout(Duration::from_secs(10), async {
+        let cb = ClientBuilder::new().max_send_buffer_size(100);
+        let sb = ServerBuilder::new().initial_window_size(1);
+        let (mut client, mut server) = common::setup_with_builders(cb, sb).await;
+
+        // Server: accept but never read data — keeps flow control blocked
+        compio_runtime::spawn(async move {
+            while let Some(result) = server.accept().await {
+                let (_req, _send_resp) = result.unwrap();
+            }
+        })
+        .detach();
+
+        // Yield to let the IO driver process the SETTINGS exchange
+        compio_runtime::time::sleep(Duration::from_millis(50)).await;
+
+        let req = http::Request::builder()
+            .method(http::Method::POST)
+            .uri("http://localhost/test")
+            .body(())
+            .unwrap();
+        let (_resp_fut, send_stream) = client.send_request(req, false).await.unwrap();
+        let mut ss = send_stream.unwrap();
+
+        // Send 200 bytes. With a 1-byte stream send window, encode_data can only
+        // send 1 byte via fast path → returns Ok(false). Then 200 bytes try to
+        // queue but 200 > max_send_buffer_size(100) → error.
+        let result = ss.send_data(Bytes::from(vec![0u8; 200]), true).await;
+
+        assert!(result.is_err(), "200 bytes should exceed 100-byte send buffer limit");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("send buffer full"),
+            "error should mention send buffer: {}",
+            err_msg
+        );
+    });
+    timeout
+        .await
+        .expect("max_send_buffer_size_enforced timed out");
 }

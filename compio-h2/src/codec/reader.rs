@@ -514,4 +514,74 @@ mod tests {
             _ => panic!("expected Headers frame"),
         }
     }
+
+    /// Roundtrip: encode a DATA frame, read it back.
+    #[compio_macros::test]
+    async fn test_frame_encode_decode_roundtrip() {
+        let mut data_frame = Data::new(StreamId::new(1), Bytes::from_static(b"hello"));
+        data_frame.set_end_stream();
+        let frame = Frame::Data(data_frame);
+
+        let mut buf = Vec::new();
+        frame.encode(&mut buf);
+
+        let cursor = Cursor::new(buf);
+        let mut reader = FrameReader::new(cursor);
+        let read_frame = reader.read_frame().await.unwrap().unwrap();
+
+        match read_frame {
+            Frame::Data(d) => {
+                assert_eq!(d.stream_id().value(), 1);
+                assert!(d.is_end_stream());
+                assert_eq!(d.payload().as_ref(), b"hello");
+            }
+            _ => panic!("expected Data frame"),
+        }
+    }
+
+    /// Roundtrip: encode multiple control frames, read them all back.
+    #[compio_macros::test]
+    async fn test_multiple_frames_roundtrip() {
+        use crate::frame::{Ping, Settings, WindowUpdate};
+
+        let mut buf = Vec::new();
+        Frame::Ping(Ping::new([1, 2, 3, 4, 5, 6, 7, 8])).encode(&mut buf);
+        Frame::Settings(Settings::ack()).encode(&mut buf);
+        Frame::WindowUpdate(WindowUpdate::new(StreamId::ZERO, 1000)).encode(&mut buf);
+
+        let cursor = Cursor::new(buf);
+        let mut reader = FrameReader::new(cursor);
+
+        let f1 = reader.read_frame().await.unwrap().unwrap();
+        assert!(matches!(f1, Frame::Ping(_)));
+        let f2 = reader.read_frame().await.unwrap().unwrap();
+        assert!(matches!(f2, Frame::Settings(_)));
+        let f3 = reader.read_frame().await.unwrap().unwrap();
+        assert!(matches!(f3, Frame::WindowUpdate(_)));
+    }
+
+    /// Roundtrip: encode a DATA frame manually via FrameHeader + payload.
+    #[compio_macros::test]
+    async fn test_manual_data_frame_roundtrip() {
+        let stream_id = StreamId::new(1);
+        let payload = Bytes::from_static(b"hello world");
+        let len = payload.len() as u32;
+
+        let header = crate::frame::FrameHeader::new(0x0, 0x1, stream_id, len);
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&header.encode());
+        buf.extend_from_slice(&payload);
+
+        let cursor = Cursor::new(buf);
+        let mut reader = FrameReader::new(cursor);
+        let frame = reader.read_frame().await.unwrap().unwrap();
+        match frame {
+            Frame::Data(d) => {
+                assert_eq!(d.stream_id().value(), 1);
+                assert!(d.is_end_stream());
+                assert_eq!(d.payload().as_ref(), b"hello world");
+            }
+            _ => panic!("expected Data frame"),
+        }
+    }
 }

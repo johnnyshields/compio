@@ -18,13 +18,10 @@ use crate::{
     frame::{self, Frame, StreamId, DEFAULT_MAX_FRAME_SIZE},
     hpack::DecodedHeader,
     state::{
-        ConnConfig, ConnExtra, ConnShared, IncomingStream, SharedState,
+        ConnShared, IncomingStream, SharedState,
         has_no_pseudo_headers, headers_to_header_map, parse_content_length,
     },
 };
-
-// Re-export for builder.rs and other modules
-pub use crate::state::{ConnConfig as ConnConfigExport, ConnExtra as ConnExtraExport};
 
 /// Configure a [`FrameReader`] from a raw reader, applying local SETTINGS.
 fn configure_reader<R: AsyncRead + 'static>(
@@ -50,7 +47,6 @@ pub(crate) async fn run_client_io<R: AsyncRead + 'static, W: AsyncWrite + 'stati
     reader_io: R,
     mut writer_io: W,
 ) -> Result<(), H2Error> {
-    let settings_local = state.borrow().settings.local().clone();
     let reader = configure_reader(reader_io, &state.borrow().settings);
 
     // Client connection preface: send magic bytes before SETTINGS.
@@ -304,10 +300,9 @@ fn flush_pending_sends(s: &mut ConnShared) {
             std::cmp::min(data_len, std::cmp::min(conn_avail, stream_avail)) as usize;
 
         if item.data.is_empty() || sendable == item.data.len() {
-            // Full send
+            // Full send — encode and wake the sender
             s.pending_send_bytes -= item.data.len();
-            let result = encode_data_frames(s, item.stream_id, item.data, item.end_stream);
-            item.result = Some(result);
+            let _result = encode_data_frames(s, item.stream_id, item.data, item.end_stream);
             if let Some(waker) = item.waker.take() {
                 waker.wake();
             }
@@ -319,7 +314,6 @@ fn flush_pending_sends(s: &mut ConnShared) {
             let result = encode_data_frames(s, item.stream_id, send_now, false);
             if result.is_err() {
                 s.pending_send_bytes -= remainder.len();
-                item.result = Some(result);
                 if let Some(waker) = item.waker.take() {
                     waker.wake();
                 }
@@ -328,12 +322,8 @@ fn flush_pending_sends(s: &mut ConnShared) {
                 still_pending.push(item);
             }
         } else if s.streams.get(&item.stream_id).is_none() && conn_avail > 0 {
-            // Stream gone
+            // Stream gone — wake the sender so it sees the error via check_error
             s.pending_send_bytes -= item.data.len();
-            item.result = Some(Err(H2Error::stream(
-                item.stream_id.value(),
-                Reason::StreamClosed,
-            )));
             if let Some(waker) = item.waker.take() {
                 waker.wake();
             }
@@ -346,54 +336,17 @@ fn flush_pending_sends(s: &mut ConnShared) {
 }
 
 /// Encode DATA frames into the write buffer, consuming flow control.
+/// Caller must ensure flow control capacity is available.
 fn encode_data_frames(
     s: &mut ConnShared,
     stream_id: StreamId,
     data: Bytes,
     end_stream: bool,
 ) -> Result<(), H2Error> {
-    let data_len = data.len() as u32;
-    if data_len > 0 {
-        s.conn_send_flow
-            .consume(data_len)
-            .map_err(|_| H2Error::connection(Reason::FlowControlError))?;
-        if let Some(stream) = s.streams.get_mut(&stream_id) {
-            stream
-                .send_flow
-                .consume(data_len)
-                .map_err(|_| H2Error::stream(stream_id.value(), Reason::FlowControlError))?;
-        }
-    }
-    if end_stream {
-        if let Some(stream) = s.streams.get_mut(&stream_id) {
-            stream.state = stream.state.send_end_stream()?;
-        }
-    }
-
-    let max_frame = s.settings.remote().max_frame_size as usize;
-    if data.is_empty() {
-        let mut flags = 0u8;
-        if end_stream {
-            flags |= 0x1;
-        }
-        let header = frame::FrameHeader::new(0x0, flags, stream_id, 0);
-        s.write_buf.extend_from_slice(&header.encode());
-    } else {
-        let mut offset = 0;
-        while offset < data.len() {
-            let end = std::cmp::min(offset + max_frame, data.len());
-            let chunk = &data[offset..end];
-            let is_last = end == data.len();
-            let mut flags = 0u8;
-            if end_stream && is_last {
-                flags |= 0x1;
-            }
-            let header = frame::FrameHeader::new(0x0, flags, stream_id, chunk.len() as u32);
-            s.write_buf.extend_from_slice(&header.encode());
-            s.write_buf.extend_from_slice(chunk);
-            offset = end;
-        }
-    }
+    // Reuse ConnShared::encode_data which handles flow control + frame encoding.
+    // It returns Ok(false) if flow control blocked, but our caller pre-checks capacity.
+    let sent = s.encode_data(stream_id, &data, end_stream)?;
+    debug_assert!(sent || data.is_empty(), "caller should have checked flow control");
     Ok(())
 }
 

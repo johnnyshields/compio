@@ -179,51 +179,44 @@ impl SendStream {
             }
         }
 
-        // Flow control blocked — queue as pending send and wait for completion
-        // Use a shared result slot that the IO driver fills when flushing
-        let result_slot = std::rc::Rc::new(std::cell::Cell::new(None::<Result<(), H2Error>>));
-        let slot_for_pending = result_slot.clone();
-
+        // Flow control blocked — queue as pending send and wait for IO driver
         {
             let mut s = self.state.borrow_mut();
+            // Enforce send buffer limit
+            if s.pending_send_bytes + data.len() > s.max_send_buffer_size {
+                return Err(H2Error::Protocol(format!(
+                    "send buffer full: {} + {} > {} bytes",
+                    s.pending_send_bytes,
+                    data.len(),
+                    s.max_send_buffer_size
+                )));
+            }
             s.pending_send_bytes += data.len();
             s.pending_sends.push(crate::state::PendingSend {
                 stream_id: self.stream_id,
                 data,
                 end_stream: end_of_stream,
                 waker: None,
-                result: None,
             });
-            s.wake_io(); // Wake IO to attempt flush
+            s.wake_io();
         }
 
-        // Wait for the IO driver to flush this pending send
+        // Wait for the IO driver to flush this pending send.
+        // The IO driver removes the item from pending_sends when flushed,
+        // then wakes our waker. If we don't find our item, it was sent.
         poll_fn(|cx| {
             let mut s = self.state.borrow_mut();
             s.check_error()?;
 
-            // Check if our pending send was completed
-            // Look through pending_sends for our stream_id and check result
-            let mut found_pending = false;
             for ps in &mut s.pending_sends {
                 if ps.stream_id == self.stream_id {
-                    if let Some(result) = ps.result.take() {
-                        return Poll::Ready(result);
-                    }
-                    // Still pending — register our waker
                     ps.waker = Some(cx.waker().clone());
-                    found_pending = true;
-                    break;
+                    return Poll::Pending;
                 }
             }
 
-            if !found_pending {
-                // Pending send was already processed and removed
-                // Check if we got an error or it was sent
-                Poll::Ready(Ok(()))
-            } else {
-                Poll::Pending
-            }
+            // Item removed from queue — send completed
+            Poll::Ready(Ok(()))
         })
         .await
     }

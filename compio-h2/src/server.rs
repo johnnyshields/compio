@@ -9,7 +9,6 @@ use compio_io::{AsyncRead, AsyncWrite, util::Splittable};
 use crate::{
     error::{H2Error, Reason},
     frame::StreamId,
-    hpack::DecodedHeader,
     proto::{ping_pong::PingPong, settings::ConnSettings},
     share::{RecvStream, SendStream},
     state::{ConnExtra, IncomingStream, SharedState, new_shared_state},
@@ -67,8 +66,8 @@ where
     compio_runtime::spawn(async move {
         let result =
             crate::proto::connection::run_server_io(state_for_io, read_half, write_half).await;
-        if let Err(ref e) = result {
-            compio_log::error!("server connection error: {}", e);
+        if let Err(ref _err) = result {
+            compio_log::error!("server connection error: {}", _err);
         }
         let _ = closed_tx.send(result);
     })

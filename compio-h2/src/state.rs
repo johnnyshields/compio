@@ -23,7 +23,7 @@ use crate::{
         flow_control::FlowControl,
         ping_pong::PingPong,
         settings::ConnSettings,
-        streams::{StreamState, StreamStore},
+        streams::StreamStore,
     },
 };
 
@@ -46,23 +46,13 @@ pub struct ConnExtra {
     pub max_send_buffer_size: Option<usize>,
 }
 
-/// Bundled configuration for connection initialization.
-pub struct ConnConfig {
-    pub settings: ConnSettings,
-    pub ping_pong: PingPong,
-    pub initial_connection_window_size: Option<u32>,
-    pub extra: ConnExtra,
-}
-
 /// A pending DATA send waiting for flow control capacity.
 pub(crate) struct PendingSend {
     pub stream_id: StreamId,
     pub data: Bytes,
     pub end_stream: bool,
-    /// Waker to wake when this pending send completes or errors.
+    /// Waker to wake when this pending send is flushed (item removed from queue).
     pub waker: Option<Waker>,
-    /// Result slot: set by the IO driver when the pending send is flushed.
-    pub result: Option<Result<(), H2Error>>,
 }
 
 /// A pending send capacity reservation waiting for flow control window.
@@ -382,43 +372,6 @@ impl ConnShared {
     }
 
     // --- Stream data delivery (called by IO driver on incoming frames) ---
-
-    /// Deliver incoming DATA to a stream's buffer and wake the recv waker.
-    pub(crate) fn deliver_data(
-        &mut self,
-        stream_id: StreamId,
-        data: Bytes,
-    ) {
-        if let Some(stream) = self.streams.get_mut(&stream_id) {
-            stream.data_buf.push_back(Ok(data));
-        }
-        self.wake_recv(&stream_id);
-    }
-
-    /// Deliver incoming trailers to a stream and wake the recv waker.
-    pub(crate) fn deliver_trailers(
-        &mut self,
-        stream_id: StreamId,
-        trailers: http::HeaderMap,
-    ) {
-        if let Some(stream) = self.streams.get_mut(&stream_id) {
-            stream.trailers_buf = Some(Ok(trailers));
-        }
-        self.wake_recv(&stream_id);
-    }
-
-    /// Deliver response headers to a stream (client side) and wake recv waker.
-    pub(crate) fn deliver_response_headers(
-        &mut self,
-        stream_id: StreamId,
-        status: http::StatusCode,
-        headers: http::HeaderMap,
-    ) {
-        if let Some(stream) = self.streams.get_mut(&stream_id) {
-            stream.response_headers = Some(Ok((status, headers)));
-        }
-        self.wake_recv(&stream_id);
-    }
 
     /// Signal that a stream's recv side is done (END_STREAM or error).
     pub(crate) fn close_stream_recv(&mut self, stream_id: &StreamId) {
