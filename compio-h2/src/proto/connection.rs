@@ -735,6 +735,10 @@ fn validate_pseudo_headers(
             if !seen_pseudos.contains(&b":path"[..]) {
                 return Err(H2Error::Protocol("missing :path pseudo-header".into()));
             }
+            // RFC 9113 §8.3.1: :path must not be empty for non-CONNECT requests
+            if decoded.iter().any(|dh| &dh.name[..] == b":path" && dh.value.is_empty()) {
+                return Err(H2Error::Protocol("empty :path pseudo-header".into()));
+            }
         }
         // Request must not have :status
         if seen_pseudos.contains(&b":status"[..]) {

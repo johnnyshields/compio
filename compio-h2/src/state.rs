@@ -386,6 +386,7 @@ impl ConnShared {
         if let Some(stream) = self.streams.get_mut(&stream_id) {
             stream.reset_reason = Some(reason);
             stream.recv_closed = true;
+            stream.state = crate::proto::streams::StreamState::Closed;
             // Push error to data buffer so data() returns the error
             stream
                 .data_buf
