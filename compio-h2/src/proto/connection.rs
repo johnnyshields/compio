@@ -397,7 +397,7 @@ fn handle_frame(s: &mut ConnShared, frame: Frame) -> Result<(), H2Error> {
 
 fn handle_data(s: &mut ConnShared, data: frame::Data) -> Result<(), H2Error> {
     let stream_id = data.stream_id();
-    let payload_len = data.payload().len() as u32;
+    let payload_len = data.flow_controlled_len();
     let end_stream = data.is_end_stream();
 
     s.conn_recv_flow

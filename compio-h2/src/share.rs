@@ -82,6 +82,10 @@ impl SendStream {
     }
 
     /// Request send capacity on this stream.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe.
     pub async fn reserve_capacity(&mut self, sz: usize) -> Result<(), H2Error> {
         let target = sz as u32;
         if self.reserved >= target {
@@ -119,6 +123,10 @@ impl SendStream {
     }
 
     /// Wait for send capacity to become available on this stream.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe.
     pub async fn poll_capacity(&mut self) -> Option<Result<usize, H2Error>> {
         if self.reserved > 0 {
             return Some(Ok(self.reserved as usize));
@@ -160,6 +168,10 @@ impl SendStream {
     }
 
     /// Send data on this stream.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is *not* cancel safe.
     pub async fn send_data(
         &mut self,
         data: impl Into<Bytes>,
@@ -222,6 +234,10 @@ impl SendStream {
     }
 
     /// Send a RST_STREAM frame to reset this stream.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe.
     pub async fn send_reset(&self, reason: Reason) -> Result<(), H2Error> {
         let mut s = self.state.borrow_mut();
         s.check_error()?;
@@ -235,6 +251,10 @@ impl SendStream {
     }
 
     /// Send trailers on this stream (implicitly sets END_STREAM).
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe.
     pub async fn send_trailers(&mut self, trailers: http::HeaderMap) -> Result<(), H2Error> {
         let trailer_vec: Vec<(Bytes, Bytes)> = trailers
             .iter()
@@ -257,6 +277,10 @@ impl SendStream {
     }
 
     /// Wait for a RST_STREAM from the peer.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe.
     pub async fn poll_reset(&mut self) -> Result<Reason, H2Error> {
         poll_fn(|cx| {
             let s = self.state.borrow();
@@ -306,6 +330,10 @@ impl RecvStream {
     }
 
     /// Receive the next chunk of data. Returns `None` when the stream ends.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe.
     pub async fn data(&mut self) -> Option<Result<Bytes, H2Error>> {
         poll_fn(|cx| {
             let mut s = self.state.borrow_mut();
@@ -340,6 +368,10 @@ impl RecvStream {
     }
 
     /// Receive trailers. Returns `None` if no trailers were sent.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe.
     pub async fn trailers(&self) -> Option<Result<http::HeaderMap, H2Error>> {
         poll_fn(|cx| {
             let mut s = self.state.borrow_mut();

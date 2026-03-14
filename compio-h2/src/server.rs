@@ -84,6 +84,10 @@ pub struct ServerConnection {
 
 impl ServerConnection {
     /// Initiate a graceful shutdown by sending a GOAWAY frame.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe.
     pub async fn shutdown(&self) -> Result<(), H2Error> {
         let mut s = self.state.borrow_mut();
         s.check_error()?;
@@ -95,6 +99,10 @@ impl ServerConnection {
     }
 
     /// Initiate an abrupt shutdown.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe.
     pub async fn abrupt_shutdown(&self, reason: Reason) -> Result<(), H2Error> {
         let mut s = self.state.borrow_mut();
         s.check_error()?;
@@ -122,6 +130,10 @@ impl ServerConnection {
     }
 
     /// Wait for the connection background task to complete.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe.
     pub async fn closed(&mut self) -> Result<(), H2Error> {
         self.closed_rx
             .recv_async()
@@ -130,6 +142,10 @@ impl ServerConnection {
     }
 
     /// Set the target connection-level receive window size at runtime.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe.
     pub async fn set_target_window_size(&self, size: u32) -> Result<(), H2Error> {
         let mut s = self.state.borrow_mut();
         s.check_error()?;
@@ -150,6 +166,10 @@ impl ServerConnection {
     }
 
     /// Set the initial stream-level window size via a SETTINGS frame.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe.
     pub async fn set_initial_window_size(&self, size: u32) -> Result<(), H2Error> {
         let mut s = self.state.borrow_mut();
         s.check_error()?;
@@ -182,6 +202,10 @@ impl ServerConnection {
     }
 
     /// Accept the next incoming request stream.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe.
     pub async fn accept(
         &mut self,
     ) -> Option<Result<(http::Request<RecvStream>, SendResponse), H2Error>> {
@@ -286,6 +310,10 @@ pub struct SendResponse {
 
 impl SendResponse {
     /// Send the response headers.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe.
     pub async fn send_response(
         &mut self,
         response: http::Response<()>,
@@ -322,6 +350,10 @@ impl SendResponse {
     }
 
     /// Wait for the peer to send a RST_STREAM on this stream.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe.
     pub async fn poll_reset(&mut self) -> Result<Reason, H2Error> {
         poll_fn(|cx| {
             let mut s = self.state.borrow_mut();

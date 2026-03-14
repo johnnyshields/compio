@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- TLS support via `tls` feature gate with `connect`/`accept` convenience wrappers and ALPN `h2` validation
+- Sub-features `native-tls` and `rustls` forwarding to `compio-tls`
+- Cancel safety documentation on all public async methods
+
+### Fixed
+
+- Flow control now charges full DATA frame payload length including padding per RFC 7540 §6.9.1
+
 ## [0.1.0] - Initial implementation
 
 ### Added
@@ -40,4 +50,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Structured `H2Error` type with `reason()`, `is_io()`, `is_reset()`, `is_connection()`, `is_go_away()`, `is_remote()`, `is_library()` helpers
 - `FrameError` and `HpackError` for granular error reporting
 - Write buffer batching with persistent Vec and read buffer reuse with persistent BytesMut
-- Placeholder `tls` feature gate (no TLS implementation yet)
+- `tls` feature gate for optional TLS support

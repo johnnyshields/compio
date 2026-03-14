@@ -74,5 +74,10 @@ pub use hpack::{DecodedHeader, Decoder as HpackDecoder, Encoder as HpackEncoder}
 pub use proto::ping_pong::PingPong;
 /// Re-export connection settings.
 pub use proto::settings::ConnSettings;
+/// TLS support for HTTP/2 connections.
+#[cfg(feature = "tls")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tls")))]
+pub mod tls;
+
 /// Re-export stream send/receive handles and flow control.
 pub use share::{RecvFlowControl, RecvStream, SendStream};
