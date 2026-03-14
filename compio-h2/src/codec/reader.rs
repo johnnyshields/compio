@@ -99,7 +99,7 @@ impl<IO: AsyncRead> FrameReader<IO> {
                     }
                     return Ok(None);
                 }
-                Err(e) => return Err(H2Error::Io(e)),
+                Err(e) => return Err(H2Error::from(e)),
             }
 
             let header_arr: [u8; 9] = header_buf[..9]
@@ -115,7 +115,7 @@ impl<IO: AsyncRead> FrameReader<IO> {
             let payload = if header.length > 0 {
                 let payload_buf = Vec::with_capacity(header.length as usize);
                 let BufResult(result, payload_buf) = self.io.read_exact(payload_buf).await;
-                result.map_err(H2Error::Io)?;
+                result.map_err(H2Error::from)?;
                 Bytes::from(payload_buf)
             } else {
                 Bytes::new()
@@ -201,7 +201,7 @@ impl<IO: AsyncRead> FrameReader<IO> {
     pub async fn read_exact_bytes(&mut self, len: usize) -> Result<Vec<u8>, H2Error> {
         let buf = Vec::with_capacity(len);
         let BufResult(result, buf) = self.io.read_exact(buf).await;
-        result.map_err(H2Error::Io)?;
+        result.map_err(H2Error::from)?;
         Ok(buf)
     }
 }

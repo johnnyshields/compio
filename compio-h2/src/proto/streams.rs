@@ -3,6 +3,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use bytes::Bytes;
+
 use crate::{
     error::{H2Error, Reason},
     frame::StreamId,
@@ -132,33 +134,20 @@ pub struct Stream {
     /// [`RecvFlowControl::release_capacity`](crate::RecvFlowControl::release_capacity).
     /// A WINDOW_UPDATE is sent for this amount, then it is reset to 0.
     pub released: u32,
-    /// Channel to send incoming data to the user's RecvStream.
-    pub data_tx: flume::Sender<Result<bytes::Bytes, H2Error>>,
-    /// Channel to send incoming trailers to the user's RecvStream.
-    pub trailers_tx: flume::Sender<Result<http::HeaderMap, H2Error>>,
-    /// Channel to deliver response headers (client-side only).
-    pub headers_tx: Option<flume::Sender<Result<(http::StatusCode, http::HeaderMap), H2Error>>>,
-    /// Channel to notify senders when the peer sends RST_STREAM.
-    pub reset_tx: Option<flume::Sender<Reason>>,
+    /// Buffered incoming DATA payloads (read by RecvStream::data()).
+    pub data_buf: VecDeque<Result<Bytes, H2Error>>,
+    /// Buffered incoming trailers (read by RecvStream::trailers()).
+    pub trailers_buf: Option<Result<http::HeaderMap, H2Error>>,
+    /// Buffered response headers (client-side, read by ResponseFuture).
+    pub response_headers: Option<Result<(http::StatusCode, http::HeaderMap), H2Error>>,
+    /// Reason code from a peer RST_STREAM (read by poll_reset()).
+    pub reset_reason: Option<Reason>,
+    /// Whether the recv side is closed (END_STREAM received or error).
+    pub recv_closed: bool,
     /// Expected content length from the content-length header, if present.
     pub expected_content_length: Option<u64>,
     /// Number of DATA bytes received so far on this stream.
     pub received_data_bytes: u64,
-}
-
-/// Receiver end for incoming stream data (held by RecvStream).
-pub struct StreamRecv {
-    /// Channel for receiving incoming DATA frame payloads.
-    pub data_rx: flume::Receiver<Result<bytes::Bytes, H2Error>>,
-    /// Channel for receiving incoming trailers.
-    pub trailers_rx: flume::Receiver<Result<http::HeaderMap, H2Error>>,
-    /// Receives response headers (client-side only).
-    pub headers_rx: Option<flume::Receiver<Result<(http::StatusCode, http::HeaderMap), H2Error>>>,
-    /// Internal channel sender for releasing flow control capacity.
-    pub internal_tx: flume::Sender<super::connection::InternalMsg>,
-    /// Receiver for peer RST_STREAM notifications (used by
-    /// SendStream/SendResponse).
-    pub reset_rx: flume::Receiver<Reason>,
 }
 
 /// Default maximum number of reset streams allowed within
@@ -249,63 +238,27 @@ impl StreamStore {
         Ok(id)
     }
 
-    /// Insert a new stream with its channels.
+    /// Insert a new stream.
     pub fn insert(
         &mut self,
         stream_id: StreamId,
         initial_send_window: i32,
         initial_recv_window: i32,
-        internal_tx: flume::Sender<super::connection::InternalMsg>,
-    ) -> StreamRecv {
-        self.insert_with_headers(
-            stream_id,
-            initial_send_window,
-            initial_recv_window,
-            false,
-            internal_tx,
-        )
-    }
-
-    /// Insert a new stream, optionally with a headers channel.
-    pub fn insert_with_headers(
-        &mut self,
-        stream_id: StreamId,
-        initial_send_window: i32,
-        initial_recv_window: i32,
-        with_headers: bool,
-        internal_tx: flume::Sender<super::connection::InternalMsg>,
-    ) -> StreamRecv {
-        let (data_tx, data_rx) = flume::unbounded();
-        let (trailers_tx, trailers_rx) = flume::unbounded();
-        let (headers_tx, headers_rx) = if with_headers {
-            let (tx, rx) = flume::bounded(1);
-            (Some(tx), Some(rx))
-        } else {
-            (None, None)
-        };
-        let (reset_tx, reset_rx) = flume::bounded(1);
-
+    ) {
         let stream = Stream {
             state: StreamState::Idle,
             send_flow: FlowControl::new(initial_send_window),
             recv_flow: FlowControl::new(initial_recv_window),
             released: 0,
-            data_tx,
-            trailers_tx,
-            headers_tx,
-            reset_tx: Some(reset_tx),
+            data_buf: VecDeque::new(),
+            trailers_buf: None,
+            response_headers: None,
+            reset_reason: None,
+            recv_closed: false,
             expected_content_length: None,
             received_data_bytes: 0,
         };
         self.streams.insert(stream_id, stream);
-
-        StreamRecv {
-            data_rx,
-            trailers_rx,
-            headers_rx,
-            internal_tx,
-            reset_rx,
-        }
     }
 
     /// Look up a stream by ID, returning a shared reference.
@@ -342,9 +295,17 @@ impl StreamStore {
         self.streams.keys().copied()
     }
 
-    /// Remove all closed streams from the store.
+    /// Remove closed streams that have no unconsumed data.
     pub fn gc_closed(&mut self) {
-        self.streams.retain(|_, s| !s.state.is_closed());
+        self.streams.retain(|_, s| {
+            if !s.state.is_closed() {
+                return true; // Keep open streams
+            }
+            // Keep closed streams that still have buffered data/trailers/headers
+            !s.data_buf.is_empty()
+                || s.trailers_buf.is_some()
+                || s.response_headers.is_some()
+        });
     }
 
     /// Collect stream IDs that need a WINDOW_UPDATE based on released bytes.
@@ -382,10 +343,6 @@ impl StreamStore {
 mod tests {
     use super::*;
 
-    fn dummy_internal_tx() -> flume::Sender<crate::proto::connection::InternalMsg> {
-        let (tx, _rx) = flume::unbounded();
-        tx
-    }
 
     #[test]
     fn test_stream_state_transitions_client() {
@@ -454,13 +411,13 @@ mod tests {
         assert!(store.can_accept_stream());
 
         // Add two open streams
-        store.insert(StreamId::new(1), 65535, 65535, dummy_internal_tx());
+        store.insert(StreamId::new(1), 65535, 65535);
         if let Some(s) = store.get_mut(&StreamId::new(1)) {
             s.state = s.state.recv_headers(false).unwrap(); // Idle -> Open
         }
         assert!(store.can_accept_stream()); // 1 open, limit 2
 
-        store.insert(StreamId::new(3), 65535, 65535, dummy_internal_tx());
+        store.insert(StreamId::new(3), 65535, 65535);
         if let Some(s) = store.get_mut(&StreamId::new(3)) {
             s.state = s.state.recv_headers(false).unwrap();
         }
@@ -478,7 +435,7 @@ mod tests {
         let mut store = StreamStore::new(false);
         store.set_max_concurrent_streams(1);
 
-        store.insert(StreamId::new(1), 65535, 65535, dummy_internal_tx());
+        store.insert(StreamId::new(1), 65535, 65535);
         if let Some(s) = store.get_mut(&StreamId::new(1)) {
             s.state = s.state.recv_headers(true).unwrap(); // Idle -> HalfClosedRemote
         }
@@ -489,9 +446,9 @@ mod tests {
     #[test]
     fn test_gc_closed_removes_only_closed_streams() {
         let mut store = StreamStore::new(false);
-        store.insert(StreamId::new(1), 65535, 65535, dummy_internal_tx());
-        store.insert(StreamId::new(3), 65535, 65535, dummy_internal_tx());
-        store.insert(StreamId::new(5), 65535, 65535, dummy_internal_tx());
+        store.insert(StreamId::new(1), 65535, 65535);
+        store.insert(StreamId::new(3), 65535, 65535);
+        store.insert(StreamId::new(5), 65535, 65535);
 
         // Open stream 1, close stream 3, leave stream 5 idle
         if let Some(s) = store.get_mut(&StreamId::new(1)) {
@@ -512,8 +469,8 @@ mod tests {
     #[test]
     fn test_gc_closed_empty_after_all_closed() {
         let mut store = StreamStore::new(true);
-        store.insert(StreamId::new(1), 65535, 65535, dummy_internal_tx());
-        store.insert(StreamId::new(3), 65535, 65535, dummy_internal_tx());
+        store.insert(StreamId::new(1), 65535, 65535);
+        store.insert(StreamId::new(3), 65535, 65535);
 
         for id in [1u32, 3] {
             if let Some(s) = store.get_mut(&StreamId::new(id)) {
@@ -528,9 +485,9 @@ mod tests {
     #[test]
     fn test_stream_ids_iteration() {
         let mut store = StreamStore::new(true);
-        store.insert(StreamId::new(1), 65535, 65535, dummy_internal_tx());
-        store.insert(StreamId::new(3), 65535, 65535, dummy_internal_tx());
-        store.insert(StreamId::new(5), 65535, 65535, dummy_internal_tx());
+        store.insert(StreamId::new(1), 65535, 65535);
+        store.insert(StreamId::new(3), 65535, 65535);
+        store.insert(StreamId::new(5), 65535, 65535);
 
         let mut ids: Vec<u32> = store.iter_ids().map(|id| id.value()).collect();
         ids.sort();
@@ -542,13 +499,13 @@ mod tests {
         let mut store = StreamStore::new(false);
         assert_eq!(store.active_count(), 0);
 
-        store.insert(StreamId::new(1), 65535, 65535, dummy_internal_tx());
+        store.insert(StreamId::new(1), 65535, 65535);
         if let Some(s) = store.get_mut(&StreamId::new(1)) {
             s.state = s.state.recv_headers(false).unwrap();
         }
         assert_eq!(store.active_count(), 1);
 
-        store.insert(StreamId::new(3), 65535, 65535, dummy_internal_tx());
+        store.insert(StreamId::new(3), 65535, 65535);
         // Stream 3 is Idle (not closed), counts as active
         assert_eq!(store.active_count(), 2);
 

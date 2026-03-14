@@ -59,6 +59,8 @@ pub mod share;
 pub(crate) mod codec;
 /// Protocol-level connection management.
 pub(crate) mod proto;
+/// Shared connection state (direct state machine access pattern).
+pub(crate) mod state;
 
 /// Re-export client and server connection builders.
 pub use builder::{ClientBuilder, ServerBuilder};

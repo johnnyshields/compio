@@ -1,32 +1,30 @@
+//! Shared stream handles: [`SendStream`], [`RecvStream`], and
+//! [`RecvFlowControl`].
+
+use std::future::poll_fn;
+use std::task::Poll;
+
 use bytes::Bytes;
 
 use crate::{
     error::{H2Error, Reason},
     frame::StreamId,
-    proto::connection::{Command, CommandSender, InternalMsg},
+    state::SharedState,
 };
 
 /// Handle for releasing recv flow control capacity on an HTTP/2 stream.
-///
-/// When data is received on a [`RecvStream`], the flow control window shrinks.
-/// The application must call [`release_capacity`](Self::release_capacity) to
-/// indicate that it has processed the data and the window can be replenished
-/// via a WINDOW_UPDATE frame to the peer.
-///
-/// This gives applications back-pressure control: the peer cannot send more
-/// data than the application is willing to buffer.
 pub struct RecvFlowControl {
     stream_id: StreamId,
     unreleased: u32,
-    internal_tx: flume::Sender<InternalMsg>,
+    state: SharedState,
 }
 
 impl RecvFlowControl {
-    pub(crate) fn new(stream_id: StreamId, internal_tx: flume::Sender<InternalMsg>) -> Self {
+    pub(crate) fn new(stream_id: StreamId, state: SharedState) -> Self {
         RecvFlowControl {
             stream_id,
             unreleased: 0,
-            internal_tx,
+            state,
         }
     }
 
@@ -36,9 +34,6 @@ impl RecvFlowControl {
     }
 
     /// Release `sz` bytes of flow control capacity back to the peer.
-    ///
-    /// This signals the connection task to send a WINDOW_UPDATE for this
-    /// stream. `sz` must not exceed the number of unreleased bytes.
     pub fn release_capacity(&mut self, sz: usize) -> Result<(), H2Error> {
         let sz = sz as u32;
         if sz > self.unreleased {
@@ -48,11 +43,9 @@ impl RecvFlowControl {
             )));
         }
         self.unreleased -= sz;
-        // Best-effort send — if the connection is gone, the stream is dead anyway
-        let _ = self.internal_tx.send(InternalMsg::ReleaseCapacity {
-            stream_id: self.stream_id,
-            amount: sz,
-        });
+        let mut s = self.state.borrow_mut();
+        s.streams.apply_release(&self.stream_id, sz);
+        s.wake_io(); // IO task will send WINDOW_UPDATE
         Ok(())
     }
 
@@ -62,35 +55,18 @@ impl RecvFlowControl {
 }
 
 /// Handle for sending data and trailers on an HTTP/2 stream.
-///
-/// If dropped without sending a final frame with `end_of_stream: true` or
-/// calling [`send_trailers`](Self::send_trailers), the stream is left
-/// half-open from the peer's perspective. No `RST_STREAM` or `END_STREAM`
-/// is sent automatically.
-///
-/// # Cancellation
-///
-/// Unless noted otherwise, methods on this type are *not* cancel-safe:
-/// dropping a future after the command has been dispatched may leave the
-/// operation completed on the wire without the caller observing the result.
 pub struct SendStream {
     stream_id: StreamId,
-    cmd_tx: CommandSender,
-    reset_rx: flume::Receiver<Reason>,
+    state: SharedState,
     /// Bytes of send capacity currently reserved by the application.
     reserved: u32,
 }
 
 impl SendStream {
-    pub(crate) fn new(
-        stream_id: StreamId,
-        cmd_tx: CommandSender,
-        reset_rx: flume::Receiver<Reason>,
-    ) -> Self {
+    pub(crate) fn new(stream_id: StreamId, state: SharedState) -> Self {
         SendStream {
             stream_id,
-            cmd_tx,
-            reset_rx,
+            state,
             reserved: 0,
         }
     }
@@ -106,21 +82,6 @@ impl SendStream {
     }
 
     /// Request send capacity on this stream.
-    ///
-    /// Asks the connection for up to `sz` bytes of send capacity, constrained
-    /// by the stream-level and connection-level flow control windows. The
-    /// granted capacity (which may be less than requested) is added to the
-    /// internal reservation and can be queried via
-    /// [`capacity`](Self::capacity).
-    ///
-    /// If no capacity is currently available, this future will wait until a
-    /// WINDOW_UPDATE is received from the peer.
-    ///
-    /// This is **not additive**: calling `reserve_capacity(100)` then
-    /// `reserve_capacity(200)` results in at most 200 reserved bytes, not 300.
-    /// The second call replaces the prior reservation target.
-    ///
-    /// This operation is *not* cancel-safe.
     pub async fn reserve_capacity(&mut self, sz: usize) -> Result<(), H2Error> {
         let target = sz as u32;
         if self.reserved >= target {
@@ -128,65 +89,77 @@ impl SendStream {
         }
         let needed = target - self.reserved;
 
-        let (tx, rx) = flume::bounded(1);
-        self.cmd_tx
-            .send_cmd(Command::ReserveCapacity {
-                stream_id: self.stream_id,
-                amount: needed,
-                response_tx: tx,
-            })
-            .await?;
-
-        let granted = rx
-            .recv_async()
-            .await
-            .map_err(|_| H2Error::Protocol("connection closed during reserve_capacity".into()))??;
+        let granted = poll_fn(|cx| {
+            let mut s = self.state.borrow_mut();
+            s.check_error()?;
+            if let Some(stream) = s.streams.get(&self.stream_id) {
+                if !stream.state.can_send() {
+                    return Poll::Ready(Err(H2Error::Protocol(
+                        "stream is not in a sendable state".into(),
+                    )));
+                }
+                let avail = std::cmp::min(
+                    s.conn_send_flow.available(),
+                    stream.send_flow.available(),
+                );
+                let grant = std::cmp::min(needed, avail);
+                if grant > 0 {
+                    return Poll::Ready(Ok(grant));
+                }
+            } else {
+                return Poll::Ready(Err(H2Error::Protocol("stream not found".into())));
+            }
+            s.writable.insert(self.stream_id, cx.waker().clone());
+            Poll::Pending
+        })
+        .await?;
 
         self.reserved += granted;
         Ok(())
     }
 
     /// Wait for send capacity to become available on this stream.
-    ///
-    /// Send capacity currently reserved after the wait, or `None` if the
-    /// stream has been reset or the connection has been closed.
-    ///
-    /// This is useful in a loop to send data as capacity becomes available,
-    /// calling [`send_data`](Self::send_data) with each granted chunk.
-    ///
-    /// This operation is *not* cancel-safe.
     pub async fn poll_capacity(&mut self) -> Option<Result<usize, H2Error>> {
         if self.reserved > 0 {
             return Some(Ok(self.reserved as usize));
         }
 
-        let (tx, rx) = flume::bounded(1);
-        if self
-            .cmd_tx
-            .send_cmd(Command::ReserveCapacity {
-                stream_id: self.stream_id,
-                amount: u32::MAX,
-                response_tx: tx,
-            })
-            .await
-            .is_err()
-        {
-            return None;
-        }
+        let result = poll_fn(|cx| {
+            let mut s = self.state.borrow_mut();
+            if let Some(ref e) = s.error {
+                return Poll::Ready(Err(e.clone()));
+            }
+            if let Some(stream) = s.streams.get(&self.stream_id) {
+                if !stream.state.can_send() {
+                    return Poll::Ready(Err(H2Error::Protocol(
+                        "stream is not in a sendable state".into(),
+                    )));
+                }
+                let avail = std::cmp::min(
+                    s.conn_send_flow.available(),
+                    stream.send_flow.available(),
+                );
+                if avail > 0 {
+                    return Poll::Ready(Ok(avail));
+                }
+            } else {
+                return Poll::Ready(Err(H2Error::Protocol("stream not found".into())));
+            }
+            s.writable.insert(self.stream_id, cx.waker().clone());
+            Poll::Pending
+        })
+        .await;
 
-        match rx.recv_async().await {
-            Ok(Ok(granted)) => {
+        match result {
+            Ok(granted) => {
                 self.reserved += granted;
                 Some(Ok(self.reserved as usize))
             }
-            Ok(Err(e)) => Some(Err(e)),
-            Err(_) => None,
+            Err(e) => Some(Err(e)),
         }
     }
 
     /// Send data on this stream.
-    ///
-    /// This operation is *not* cancel-safe.
     pub async fn send_data(
         &mut self,
         data: impl Into<Bytes>,
@@ -194,46 +167,81 @@ impl SendStream {
     ) -> Result<(), H2Error> {
         let data = data.into();
         let len = data.len() as u32;
-        // Consume from reserved capacity (allow sending without reservation too)
         self.reserved = self.reserved.saturating_sub(len);
 
-        let (tx, rx) = flume::bounded(1);
-        self.cmd_tx
-            .send_cmd(Command::SendData {
+        // Try to encode directly into write buffer (fast path)
+        {
+            let mut s = self.state.borrow_mut();
+            s.check_error()?;
+            if s.encode_data(self.stream_id, &data, end_of_stream)? {
+                s.wake_io();
+                return Ok(());
+            }
+        }
+
+        // Flow control blocked — queue as pending send and wait for completion
+        // Use a shared result slot that the IO driver fills when flushing
+        let result_slot = std::rc::Rc::new(std::cell::Cell::new(None::<Result<(), H2Error>>));
+        let slot_for_pending = result_slot.clone();
+
+        {
+            let mut s = self.state.borrow_mut();
+            s.pending_send_bytes += data.len();
+            s.pending_sends.push(crate::state::PendingSend {
                 stream_id: self.stream_id,
                 data,
                 end_stream: end_of_stream,
-                response_tx: tx,
-            })
-            .await?;
+                waker: None,
+                result: None,
+            });
+            s.wake_io(); // Wake IO to attempt flush
+        }
 
-        rx.recv_async()
-            .await
-            .map_err(|_| H2Error::Protocol("connection closed during send_data".into()))?
+        // Wait for the IO driver to flush this pending send
+        poll_fn(|cx| {
+            let mut s = self.state.borrow_mut();
+            s.check_error()?;
+
+            // Check if our pending send was completed
+            // Look through pending_sends for our stream_id and check result
+            let mut found_pending = false;
+            for ps in &mut s.pending_sends {
+                if ps.stream_id == self.stream_id {
+                    if let Some(result) = ps.result.take() {
+                        return Poll::Ready(result);
+                    }
+                    // Still pending — register our waker
+                    ps.waker = Some(cx.waker().clone());
+                    found_pending = true;
+                    break;
+                }
+            }
+
+            if !found_pending {
+                // Pending send was already processed and removed
+                // Check if we got an error or it was sent
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
+        })
+        .await
     }
 
-    /// Send a RST_STREAM frame to reset this stream with the given reason.
-    ///
-    /// This immediately closes the stream in both directions.
-    ///
-    /// This operation is *not* cancel-safe.
+    /// Send a RST_STREAM frame to reset this stream.
     pub async fn send_reset(&self, reason: Reason) -> Result<(), H2Error> {
-        let (tx, rx) = flume::bounded(1);
-        self.cmd_tx
-            .send_cmd(Command::SendReset {
-                stream_id: self.stream_id,
-                reason,
-                response_tx: tx,
-            })
-            .await?;
-        rx.recv_async()
-            .await
-            .map_err(|_| H2Error::Protocol("connection closed during send_reset".into()))?
+        let mut s = self.state.borrow_mut();
+        s.check_error()?;
+        s.encode_rst_stream(self.stream_id, reason);
+        if let Some(stream) = s.streams.get_mut(&self.stream_id) {
+            stream.state = stream.state.reset();
+        }
+        s.close_stream_recv(&self.stream_id);
+        s.wake_io();
+        Ok(())
     }
 
     /// Send trailers on this stream (implicitly sets END_STREAM).
-    ///
-    /// This operation is *not* cancel-safe.
     pub async fn send_trailers(&mut self, trailers: http::HeaderMap) -> Result<(), H2Error> {
         let trailer_vec: Vec<(Bytes, Bytes)> = trailers
             .iter()
@@ -245,64 +253,52 @@ impl SendStream {
             })
             .collect();
 
-        let (tx, rx) = flume::bounded(1);
-        self.cmd_tx
-            .send_cmd(Command::SendTrailers {
-                stream_id: self.stream_id,
-                trailers: trailer_vec,
-                response_tx: tx,
-            })
-            .await?;
-
-        rx.recv_async()
-            .await
-            .map_err(|_| H2Error::Protocol("connection closed during send_trailers".into()))?
+        let mut s = self.state.borrow_mut();
+        s.check_error()?;
+        s.encode_headers(self.stream_id, &trailer_vec, true)?;
+        if let Some(stream) = s.streams.get_mut(&self.stream_id) {
+            stream.state = stream.state.send_headers(true)?;
+        }
+        s.wake_io();
+        Ok(())
     }
 
-    /// The reason code from a RST_STREAM frame.
-    ///
-    /// This operation is cancel-safe.
+    /// Wait for a RST_STREAM from the peer.
     pub async fn poll_reset(&mut self) -> Result<Reason, H2Error> {
-        self.reset_rx
-            .recv_async()
-            .await
-            .map_err(|_| H2Error::Protocol("stream closed without reset".into()))
+        poll_fn(|cx| {
+            let s = self.state.borrow();
+            if let Some(stream) = s.streams.get(&self.stream_id) {
+                if let Some(reason) = stream.reset_reason {
+                    return Poll::Ready(Ok(reason));
+                }
+            } else {
+                return Poll::Ready(Err(H2Error::Protocol("stream not found".into())));
+            }
+            if let Some(ref e) = s.error {
+                return Poll::Ready(Err(e.clone()));
+            }
+            drop(s);
+            let mut s = self.state.borrow_mut();
+            s.readable.insert(self.stream_id, cx.waker().clone());
+            Poll::Pending
+        })
+        .await
     }
 }
 
 /// Handle for receiving data and trailers on an HTTP/2 stream.
-///
-/// After receiving data via [`data()`](Self::data), call
-/// [`flow_control`](Self::flow_control) then
-/// [`release_capacity`](RecvFlowControl::release_capacity) to replenish the
-/// peer's send window.
-///
-/// If dropped before consuming all data, unconsumed frames are silently
-/// discarded.
-///
-/// # Cancellation
-///
-/// Methods on this type are cancel-safe: dropping a future before
-/// completion loses no data.
 pub struct RecvStream {
     stream_id: StreamId,
-    data_rx: flume::Receiver<Result<Bytes, H2Error>>,
-    trailers_rx: flume::Receiver<Result<http::HeaderMap, H2Error>>,
     flow_control: RecvFlowControl,
+    state: SharedState,
 }
 
 impl RecvStream {
-    pub(crate) fn new(
-        stream_id: StreamId,
-        data_rx: flume::Receiver<Result<Bytes, H2Error>>,
-        trailers_rx: flume::Receiver<Result<http::HeaderMap, H2Error>>,
-        internal_tx: flume::Sender<InternalMsg>,
-    ) -> Self {
+    pub(crate) fn new(stream_id: StreamId, state: SharedState) -> Self {
         RecvStream {
             stream_id,
-            data_rx,
-            trailers_rx,
-            flow_control: RecvFlowControl::new(stream_id, internal_tx),
+            flow_control: RecvFlowControl::new(stream_id, state.clone()),
+            state,
         }
     }
 
@@ -317,27 +313,62 @@ impl RecvStream {
     }
 
     /// Receive the next chunk of data. Returns `None` when the stream ends.
-    ///
-    /// The received bytes are tracked as unreleased in the flow control handle.
-    /// Call [`flow_control`](Self::flow_control) and
-    /// [`release_capacity`](RecvFlowControl::release_capacity) after processing
-    /// the data.
-    ///
-    /// This operation is cancel-safe.
     pub async fn data(&mut self) -> Option<Result<Bytes, H2Error>> {
-        match self.data_rx.recv_async().await.ok() {
-            Some(Ok(bytes)) => {
-                self.flow_control.add_unreleased(bytes.len() as u32);
-                Some(Ok(bytes))
+        poll_fn(|cx| {
+            let mut s = self.state.borrow_mut();
+
+            // Check for buffered data
+            if let Some(stream) = s.streams.get_mut(&self.stream_id) {
+                if let Some(item) = stream.data_buf.pop_front() {
+                    match item {
+                        Ok(bytes) => {
+                            self.flow_control.add_unreleased(bytes.len() as u32);
+                            return Poll::Ready(Some(Ok(bytes)));
+                        }
+                        Err(e) => return Poll::Ready(Some(Err(e))),
+                    }
+                }
+                if stream.recv_closed {
+                    return Poll::Ready(None);
+                }
+            } else {
+                return Poll::Ready(None);
             }
-            other => other,
-        }
+
+            // Check connection error
+            if let Some(ref e) = s.error {
+                return Poll::Ready(Some(Err(e.clone())));
+            }
+
+            s.readable.insert(self.stream_id, cx.waker().clone());
+            Poll::Pending
+        })
+        .await
     }
 
     /// Receive trailers. Returns `None` if no trailers were sent.
-    ///
-    /// This operation is cancel-safe.
     pub async fn trailers(&self) -> Option<Result<http::HeaderMap, H2Error>> {
-        self.trailers_rx.recv_async().await.ok()
+        poll_fn(|cx| {
+            let mut s = self.state.borrow_mut();
+
+            if let Some(stream) = s.streams.get_mut(&self.stream_id) {
+                if let Some(trailers) = stream.trailers_buf.take() {
+                    return Poll::Ready(Some(trailers));
+                }
+                if stream.recv_closed {
+                    return Poll::Ready(None);
+                }
+            } else {
+                return Poll::Ready(None);
+            }
+
+            if let Some(ref e) = s.error {
+                return Poll::Ready(Some(Err(e.clone())));
+            }
+
+            s.readable.insert(self.stream_id, cx.waker().clone());
+            Poll::Pending
+        })
+        .await
     }
 }

@@ -162,7 +162,7 @@ pub enum HpackError {
 }
 
 /// Errors returned by the HTTP/2 implementation.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum H2Error {
     /// A connection-level error that requires the entire connection to be
     /// closed.
@@ -200,7 +200,7 @@ pub enum H2Error {
 
     /// An underlying I/O error from the transport layer.
     #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(std::sync::Arc<std::io::Error>),
 
     /// An HPACK header compression or decompression error.
     #[error("HPACK error: {0}")]
@@ -221,6 +221,12 @@ pub enum H2Error {
     /// An HPACK decoding error.
     #[error("HPACK decode error: {0}")]
     HpackDecode(#[from] HpackError),
+}
+
+impl From<std::io::Error> for H2Error {
+    fn from(e: std::io::Error) -> Self {
+        H2Error::Io(std::sync::Arc::new(e))
+    }
 }
 
 impl H2Error {
@@ -351,7 +357,7 @@ impl H2Error {
     /// variant.
     pub fn into_io(self) -> Option<std::io::Error> {
         match self {
-            H2Error::Io(e) => Some(e),
+            H2Error::Io(e) => std::sync::Arc::try_unwrap(e).ok(),
             _ => None,
         }
     }
@@ -405,13 +411,13 @@ mod tests {
 
     #[test]
     fn test_h2error_reason_none_for_io() {
-        let err = H2Error::Io(std::io::Error::other("test"));
+        let err = H2Error::from(std::io::Error::other("test"));
         assert_eq!(err.reason(), None);
     }
 
     #[test]
     fn test_h2error_is_io() {
-        let io_err = H2Error::Io(std::io::Error::other("test"));
+        let io_err = H2Error::from(std::io::Error::other("test"));
         assert!(io_err.is_io());
         assert!(!H2Error::connection(Reason::NoError).is_io());
     }
@@ -466,7 +472,7 @@ mod tests {
 
         // Non-connection/stream errors
         assert!(!H2Error::Protocol("test".into()).is_remote());
-        assert!(!H2Error::Io(std::io::Error::other("test")).is_remote());
+        assert!(!H2Error::from(std::io::Error::other("test")).is_remote());
     }
 
     #[test]
@@ -480,13 +486,13 @@ mod tests {
         // Not library errors
         assert!(!H2Error::connection(Reason::ProtocolError).is_library());
         assert!(!H2Error::stream(1, Reason::Cancel).is_library());
-        assert!(!H2Error::Io(std::io::Error::other("test")).is_library());
+        assert!(!H2Error::from(std::io::Error::other("test")).is_library());
         assert!(!H2Error::go_away(0, Reason::NoError, Bytes::new()).is_library());
     }
 
     #[test]
     fn test_h2error_get_io() {
-        let io_err = H2Error::Io(std::io::Error::new(
+        let io_err = H2Error::from(std::io::Error::new(
             std::io::ErrorKind::BrokenPipe,
             "broken",
         ));
@@ -501,7 +507,7 @@ mod tests {
 
     #[test]
     fn test_h2error_into_io() {
-        let io_err = H2Error::Io(std::io::Error::new(
+        let io_err = H2Error::from(std::io::Error::new(
             std::io::ErrorKind::BrokenPipe,
             "broken",
         ));

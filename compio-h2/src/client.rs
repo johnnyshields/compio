@@ -1,16 +1,17 @@
+//! HTTP/2 client API.
+
+use std::future::poll_fn;
+use std::task::Poll;
+
 use bytes::Bytes;
 use compio_io::{AsyncRead, AsyncWrite, util::Splittable};
 
 use crate::{
     error::H2Error,
     frame::StreamId,
-    proto::{
-        connection::{Command, CommandSender, InternalMsg},
-        ping_pong::PingPong,
-        settings::ConnSettings,
-        streams::StreamRecv,
-    },
+    proto::{ping_pong::PingPong, settings::ConnSettings},
     share::{RecvStream, SendStream},
+    state::{ConnExtra, SharedState, new_shared_state},
 };
 
 /// Create a new client builder for configuring HTTP/2 connection settings.
@@ -33,8 +34,6 @@ pub fn builder() -> crate::builder::ClientBuilder {
 /// compio_runtime::spawn(connection.run()).detach();
 /// # });
 /// ```
-///
-/// This operation is *not* cancel-safe.
 pub async fn handshake<IO>(
     io: IO,
 ) -> Result<(SendRequest, ClientConnection<IO::ReadHalf, IO::WriteHalf>), H2Error>
@@ -48,20 +47,18 @@ where
         ConnSettings::new(),
         PingPong::disabled(),
         None,
-        crate::proto::connection::ConnExtra::default(),
+        ConnExtra::default(),
     )
     .await
 }
 
 /// Perform HTTP/2 client handshake with explicit settings and keepalive.
-///
-/// This operation is *not* cancel-safe.
 pub async fn handshake_with_settings<IO>(
     io: IO,
     settings: ConnSettings,
     ping_pong: PingPong,
     initial_connection_window_size: Option<u32>,
-    extra: crate::proto::connection::ConnExtra,
+    extra: ConnExtra,
 ) -> Result<(SendRequest, ClientConnection<IO::ReadHalf, IO::WriteHalf>), H2Error>
 where
     IO: Splittable + 'static,
@@ -69,130 +66,119 @@ where
     IO::WriteHalf: AsyncWrite + 'static,
 {
     let (read_half, write_half) = io.split();
-    let (internal_tx, internal_rx) = flume::unbounded::<InternalMsg>();
 
-    let cmd_sender = CommandSender::new(internal_tx.clone());
+    let state = new_shared_state(true, settings, ping_pong, initial_connection_window_size, extra);
 
-    let conn = ClientConnection {
-        internal_rx,
-        internal_tx,
-        read_half,
-        write_half,
-        settings,
-        ping_pong,
-        initial_connection_window_size,
-        extra,
+    let send_request = SendRequest {
+        state: state.clone(),
     };
 
-    let send_request = SendRequest { cmd_tx: cmd_sender };
+    let conn = ClientConnection {
+        state,
+        read_half,
+        write_half,
+    };
 
     Ok((send_request, conn))
 }
 
 /// Handle for sending requests on a client connection.
-///
-/// # Cancellation
-///
-/// Unless noted otherwise, methods on this type are *not* cancel-safe:
-/// dropping a future after the command has been dispatched may leave the
-/// operation completed on the wire without the caller observing the result.
 #[derive(Clone)]
 pub struct SendRequest {
-    cmd_tx: CommandSender,
+    state: SharedState,
 }
 
 impl SendRequest {
     /// Wait until the connection can accept a new stream.
-    ///
-    /// Resolves when the number of active streams is below the peer's
-    /// `MAX_CONCURRENT_STREAMS` limit, or returns an error if the connection
-    /// is closing.
-    ///
-    /// Use this before [`send_request`](Self::send_request) to avoid getting a
-    /// `RefusedStream` error when the limit has been reached.
-    ///
-    /// This operation is cancel-safe.
     pub async fn ready(&mut self) -> Result<(), H2Error> {
-        let (tx, rx) = flume::bounded(1);
-        self.cmd_tx
-            .send_cmd(Command::PollReady { response_tx: tx })
-            .await?;
-        rx.recv_async()
-            .await
-            .map_err(|_| H2Error::Protocol("connection closed".into()))?
+        poll_fn(|cx| {
+            let mut s = self.state.borrow_mut();
+            s.check_error()?;
+            if s.going_away {
+                return Poll::Ready(Err(H2Error::connection(
+                    crate::error::Reason::RefusedStream,
+                )));
+            }
+            if s.streams.can_accept_stream() {
+                return Poll::Ready(Ok(()));
+            }
+            s.ready_waiters.push_back(cx.waker().clone());
+            Poll::Pending
+        })
+        .await
     }
 
     /// Initiate a graceful shutdown by sending a GOAWAY frame.
-    ///
-    /// After calling this, no new streams can be opened. Existing streams
-    /// will be allowed to complete, and the connection will close once all
-    /// active streams are finished.
-    ///
-    /// This operation is *not* cancel-safe.
     pub async fn shutdown(&self) -> Result<(), H2Error> {
-        let (tx, rx) = flume::bounded(1);
-        self.cmd_tx
-            .send_cmd(Command::GoAway { response_tx: tx })
-            .await?;
-        rx.recv_async()
-            .await
-            .map_err(|_| H2Error::Protocol("connection closed".into()))?
+        let mut s = self.state.borrow_mut();
+        s.check_error()?;
+        let last_stream_id = s.last_peer_stream_id;
+        s.encode_goaway(last_stream_id, crate::error::Reason::NoError);
+        s.going_away = true;
+        s.wake_io();
+        Ok(())
     }
 
     /// Set the target connection-level receive window size at runtime.
-    ///
-    /// If `size` is larger than the current connection receive window, a
-    /// WINDOW_UPDATE frame is sent immediately for the difference. If smaller,
-    /// the window shrinks naturally as data arrives.
-    ///
-    /// This operation is *not* cancel-safe.
     pub async fn set_target_window_size(&self, size: u32) -> Result<(), H2Error> {
-        let (tx, rx) = flume::bounded(1);
-        self.cmd_tx
-            .send_cmd(Command::SetTargetWindowSize {
-                size,
-                response_tx: tx,
-            })
-            .await?;
-        rx.recv_async()
-            .await
-            .map_err(|_| H2Error::Protocol("connection closed".into()))?
+        let mut s = self.state.borrow_mut();
+        s.check_error()?;
+        if size > 0x7FFF_FFFF {
+            return Err(H2Error::connection(crate::error::Reason::FlowControlError));
+        }
+        let current = s.conn_recv_flow.window_size();
+        let target = size as i32;
+        if target > current {
+            let increment = (target - current) as u32;
+            s.encode_window_update(StreamId::ZERO, increment);
+            s.conn_recv_flow
+                .release(increment)
+                .map_err(|_| H2Error::connection(crate::error::Reason::FlowControlError))?;
+        }
+        s.wake_io();
+        Ok(())
     }
 
     /// Set the initial stream-level window size via a SETTINGS frame.
-    ///
-    /// This changes the INITIAL_WINDOW_SIZE for newly created streams and
-    /// adjusts the receive windows of all existing open streams by the delta
-    /// between the old and new values (per RFC 7540 §6.9.2).
-    ///
-    /// This operation is *not* cancel-safe.
     pub async fn set_initial_window_size(&self, size: u32) -> Result<(), H2Error> {
-        let (tx, rx) = flume::bounded(1);
-        self.cmd_tx
-            .send_cmd(Command::SetInitialWindowSize {
-                size,
-                response_tx: tx,
-            })
-            .await?;
-        rx.recv_async()
-            .await
-            .map_err(|_| H2Error::Protocol("connection closed".into()))?
+        let mut s = self.state.borrow_mut();
+        s.check_error()?;
+        if size > 0x7FFF_FFFF {
+            return Err(H2Error::connection(crate::error::Reason::FlowControlError));
+        }
+        let old_size = s.settings.local().initial_window_size as i32;
+        let new_size = size as i32;
+        s.settings.set_local_initial_window_size(size);
+        if let Some(frame) = s.settings.build_local_settings() {
+            s.encode_settings(&frame);
+        }
+        let delta = new_size - old_size;
+        if delta != 0 {
+            let stream_ids: Vec<StreamId> = s.streams.iter_ids().collect();
+            for id in stream_ids {
+                if let Some(stream) = s.streams.get_mut(&id) {
+                    if stream.state.is_closed() {
+                        continue;
+                    }
+                    stream
+                        .recv_flow
+                        .update_initial_window_size(new_size)
+                        .map_err(|_| {
+                            H2Error::connection(crate::error::Reason::FlowControlError)
+                        })?;
+                }
+            }
+        }
+        s.wake_io();
+        Ok(())
     }
 
     /// Send an HTTP/2 request.
-    ///
-    /// The returned [`ResponseFuture`] resolves when the response headers
-    /// arrive. If `end_of_stream` is false, a [`SendStream`] is also returned
-    /// for sending the request body.
-    ///
-    /// This operation is *not* cancel-safe; if dropped after dispatch, an
-    /// orphaned stream may be opened.
     pub async fn send_request(
         &mut self,
         request: http::Request<()>,
         end_of_stream: bool,
     ) -> Result<(ResponseFuture, Option<SendStream>), H2Error> {
-        // Build pseudo-headers + regular headers
         let mut headers = Vec::new();
         headers.push((
             Bytes::from_static(b":method"),
@@ -219,8 +205,6 @@ impl SendRequest {
                 Bytes::copy_from_slice(authority.as_str().as_bytes()),
             ));
         }
-
-        // Regular headers
         for (name, value) in request.headers() {
             headers.push((
                 Bytes::copy_from_slice(name.as_str().as_bytes()),
@@ -228,29 +212,38 @@ impl SendRequest {
             ));
         }
 
-        let (tx, rx) = flume::bounded(1);
-        self.cmd_tx
-            .send_cmd(Command::NewStream {
-                headers,
-                end_stream: end_of_stream,
-                response_tx: tx,
-            })
-            .await?;
+        let stream_id = {
+            let mut s = self.state.borrow_mut();
+            s.check_error()?;
+            if s.going_away {
+                return Err(H2Error::connection(crate::error::Reason::RefusedStream));
+            }
+            if !s.streams.can_accept_stream() {
+                return Err(H2Error::Protocol("max concurrent streams exceeded".into()));
+            }
+            let stream_id = s.streams.next_stream_id()?;
+            let initial_send_window = s.settings.remote().initial_window_size as i32;
+            let initial_recv_window = s.settings.local().initial_window_size as i32;
+            s.streams
+                .insert(stream_id, initial_send_window, initial_recv_window);
 
-        let (stream_id, stream_recv) = rx
-            .recv_async()
-            .await
-            .map_err(|_| H2Error::Protocol("connection closed".into()))??;
+            s.encode_headers(stream_id, &headers, end_of_stream)?;
 
-        let reset_rx = stream_recv.reset_rx.clone();
+            if let Some(stream) = s.streams.get_mut(&stream_id) {
+                stream.state = stream.state.send_headers(end_of_stream)?;
+            }
+
+            s.wake_io();
+            stream_id
+        };
 
         let response_future = ResponseFuture {
             stream_id,
-            stream_recv: Some(stream_recv),
+            state: self.state.clone(),
         };
 
         let send_stream = if !end_of_stream {
-            Some(SendStream::new(stream_id, self.cmd_tx.clone(), reset_rx))
+            Some(SendStream::new(stream_id, self.state.clone()))
         } else {
             None
         };
@@ -260,39 +253,35 @@ impl SendRequest {
 }
 
 /// Future that resolves to an HTTP response.
-///
-/// # Cancellation
-///
-/// `await_response` consumes `self` and is *not* cancel-safe.
 pub struct ResponseFuture {
     stream_id: StreamId,
-    stream_recv: Option<StreamRecv>,
+    state: SharedState,
 }
 
 impl ResponseFuture {
     /// Wait for the response headers.
-    pub async fn await_response(mut self) -> Result<http::Response<RecvStream>, H2Error> {
-        let stream_recv = self
-            .stream_recv
-            .take()
-            .ok_or_else(|| H2Error::Protocol("response already consumed".into()))?;
+    pub async fn await_response(self) -> Result<http::Response<RecvStream>, H2Error> {
+        let (status, headers) = poll_fn(|cx| {
+            let mut s = self.state.borrow_mut();
 
-        // Wait for response headers from the connection task
-        let (status, headers) = if let Some(headers_rx) = stream_recv.headers_rx {
-            headers_rx
-                .recv_async()
-                .await
-                .map_err(|_| H2Error::Protocol("connection closed before response".into()))??
-        } else {
-            (http::StatusCode::OK, http::HeaderMap::new())
-        };
+            if let Some(stream) = s.streams.get_mut(&self.stream_id) {
+                if let Some(result) = stream.response_headers.take() {
+                    return Poll::Ready(result);
+                }
+            } else {
+                return Poll::Ready(Err(H2Error::Protocol("stream not found".into())));
+            }
 
-        let recv_stream = RecvStream::new(
-            self.stream_id,
-            stream_recv.data_rx,
-            stream_recv.trailers_rx,
-            stream_recv.internal_tx,
-        );
+            if let Some(ref e) = s.error {
+                return Poll::Ready(Err(e.clone()));
+            }
+
+            s.readable.insert(self.stream_id, cx.waker().clone());
+            Poll::Pending
+        })
+        .await?;
+
+        let recv_stream = RecvStream::new(self.stream_id, self.state.clone());
 
         let mut response = http::Response::builder()
             .status(status)
@@ -306,37 +295,15 @@ impl ResponseFuture {
 }
 
 /// Client connection handle. Must be spawned as a background task.
-///
-/// # Cancellation
-///
-/// The [`run`](Self::run) future is *not* cancel-safe. Dropping it
-/// terminates the connection immediately.
 pub struct ClientConnection<R, W> {
-    internal_rx: flume::Receiver<InternalMsg>,
-    internal_tx: flume::Sender<InternalMsg>,
+    state: SharedState,
     read_half: R,
     write_half: W,
-    settings: ConnSettings,
-    ping_pong: PingPong,
-    initial_connection_window_size: Option<u32>,
-    extra: crate::proto::connection::ConnExtra,
 }
 
 impl<R: AsyncRead + 'static, W: AsyncWrite + 'static> ClientConnection<R, W> {
-    /// Run the client connection. This should be spawned as a background task.
+    /// Run the client connection IO driver.
     pub async fn run(self) -> Result<(), H2Error> {
-        crate::proto::connection::run_client_connection(
-            self.read_half,
-            self.write_half,
-            self.internal_rx,
-            self.internal_tx,
-            crate::proto::connection::ConnConfig {
-                settings: self.settings,
-                ping_pong: self.ping_pong,
-                initial_connection_window_size: self.initial_connection_window_size,
-                extra: self.extra,
-            },
-        )
-        .await
+        crate::proto::connection::run_client_io(self.state, self.read_half, self.write_half).await
     }
 }

@@ -49,11 +49,11 @@ impl<IO: AsyncWrite> FrameWriter<IO> {
         self.flush_buf().await?;
         // Write 9-byte frame header
         let BufResult(result, _) = self.io.write_all(header_bytes).await;
-        result.map_err(H2Error::Io)?;
+        result.map_err(H2Error::from)?;
         // Write payload directly from Bytes (no copy into buffer)
         if !payload.is_empty() {
             let BufResult(result, _) = self.io.write_all(payload.clone()).await;
-            result.map_err(H2Error::Io)?;
+            result.map_err(H2Error::from)?;
         }
         Ok(())
     }
@@ -63,7 +63,7 @@ impl<IO: AsyncWrite> FrameWriter<IO> {
         // Flush buffer first so ordering is preserved
         self.flush_buf().await?;
         let BufResult(result, _) = self.io.write_all(data).await;
-        result.map_err(H2Error::Io)?;
+        result.map_err(H2Error::from)?;
         Ok(())
     }
 
@@ -75,7 +75,7 @@ impl<IO: AsyncWrite> FrameWriter<IO> {
                 Vec::with_capacity(WRITE_BUFFER_FLUSH_THRESHOLD),
             );
             let BufResult(result, _) = self.io.write_all(buf).await;
-            result.map_err(H2Error::Io)?;
+            result.map_err(H2Error::from)?;
         }
         Ok(())
     }
@@ -83,7 +83,7 @@ impl<IO: AsyncWrite> FrameWriter<IO> {
     /// Shutdown the writer (flushes buffer first).
     pub async fn shutdown(&mut self) -> Result<(), H2Error> {
         self.flush_buf().await?;
-        self.io.shutdown().await.map_err(H2Error::Io)
+        self.io.shutdown().await.map_err(H2Error::from)
     }
 }
 

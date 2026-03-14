@@ -5,8 +5,9 @@ use compio_io::{AsyncRead, AsyncWrite, util::Splittable};
 use crate::{
     client::{self, ClientConnection, SendRequest},
     error::H2Error,
-    proto::{connection::ConnExtra, ping_pong::PingPong, settings::ConnSettings},
+    proto::{ping_pong::PingPong, settings::ConnSettings},
     server::ServerConnection,
+    state::ConnExtra,
 };
 
 /// Shared builder settings wrapping `ConnSettings` and keepalive configuration.
