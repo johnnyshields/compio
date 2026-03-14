@@ -268,6 +268,19 @@ impl ResponseFuture {
                 if let Some(result) = stream.response_headers.take() {
                     return Poll::Ready(result);
                 }
+                // Stream was reset by peer — no response headers coming
+                if let Some(reason) = stream.reset_reason {
+                    return Poll::Ready(Err(H2Error::stream_remote(
+                        self.stream_id.value(),
+                        reason,
+                    )));
+                }
+                // Stream recv closed without headers (e.g., RST_STREAM)
+                if stream.recv_closed {
+                    return Poll::Ready(Err(H2Error::Protocol(
+                        "stream closed before response headers".into(),
+                    )));
+                }
             } else {
                 return Poll::Ready(Err(H2Error::Protocol("stream not found".into())));
             }

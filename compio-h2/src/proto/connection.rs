@@ -127,30 +127,32 @@ async fn run_io_loop<R: AsyncRead + 'static, W: AsyncWrite>(
     // Spawn a reader task that reads frames and processes them into state
     let state_for_reader = state.clone();
     let reader_task = compio_runtime::spawn(async move {
+
         loop {
             let result = reader.read_frame().await;
             let mut s = state_for_reader.borrow_mut();
             match result {
                 Ok(Some(frame)) => {
+
                     if let Err(e) = handle_frame(&mut s, frame) {
+
                         s.terminate(e);
                         return;
                     }
                 }
                 Ok(None) => {
-                    // EOF — connection closed by peer
+
                     s.drain_ready_waiters();
                     return;
                 }
                 Err(e) => {
-                    // Convert to connection error
+
                     let conn_err = frame_read_error_to_connection_error(e);
                     s.terminate(conn_err);
                     return;
                 }
             }
             // After handling frames, wake IO to flush any generated responses
-            // (SETTINGS ACK, WINDOW_UPDATE, PONG, etc.)
             s.wake_io();
         }
     });
@@ -164,15 +166,17 @@ async fn run_io_loop<R: AsyncRead + 'static, W: AsyncWrite>(
         let mut s = state.borrow_mut();
         if let Err(ref e) = result {
             if let Some(reason) = e.reason() {
-                if !s.going_away {
-                    let last_id = s.last_peer_stream_id;
-                    s.encode_goaway(last_id, reason);
-                }
+                // Always send GOAWAY on connection error, even if
+                // terminate() was already called (which sets going_away).
+                // The reader task may have called terminate() but didn't
+                // encode GOAWAY — we do it here before flushing.
+                let last_id = s.last_peer_stream_id;
+                s.encode_goaway(last_id, reason);
             }
             s.terminate(e.clone());
         }
     }
-    // Final flush
+    // Final flush — sends GOAWAY to peer
     let _ = flush_write_buf(&state, &mut writer_io).await;
     let _ = writer_io.shutdown().await;
     result
@@ -184,6 +188,7 @@ async fn io_flush_loop<W: AsyncWrite>(
     state: &SharedState,
     writer_io: &mut W,
 ) -> Result<(), H2Error> {
+
     loop {
         // Wait for wake signal from user operations or reader task
         poll_fn(|cx| {
@@ -191,6 +196,7 @@ async fn io_flush_loop<W: AsyncWrite>(
 
             // Check for errors
             if let Some(ref e) = s.error {
+
                 return Poll::Ready(Err(e.clone()));
             }
 
@@ -199,6 +205,7 @@ async fn io_flush_loop<W: AsyncWrite>(
             s.poller = Some(cx.waker().clone());
 
             if ready {
+
                 Poll::Ready(Ok(()))
             } else {
                 Poll::Pending
@@ -212,6 +219,7 @@ async fn io_flush_loop<W: AsyncWrite>(
 
             // Check for errors
             if let Some(ref e) = s.error {
+
                 return Err(e.clone());
             }
 
@@ -243,16 +251,22 @@ async fn io_flush_loop<W: AsyncWrite>(
             // Wake ready waiters
             s.notify_ready_waiters();
 
-            // Graceful shutdown check
-            if s.going_away && s.streams.active_count() == 0 && s.error.is_none() {
-                s.drain_ready_waiters();
-                // Don't return error — clean shutdown
-                break;
-            }
         }
 
         // Flush write buffer to TCP (outside the lock)
         flush_write_buf(state, writer_io).await?;
+
+        // Graceful shutdown check (after flush so GOAWAY reaches the peer)
+        {
+            let s = state.borrow();
+
+            if s.going_away && s.streams.active_count() == 0 && s.error.is_none() {
+                drop(s);
+
+                state.borrow_mut().drain_ready_waiters();
+                break;
+            }
+        }
     }
     Ok(())
 }
