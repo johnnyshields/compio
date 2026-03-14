@@ -1,7 +1,8 @@
 //! TLS support for HTTP/2 connections.
 //!
 //! Provides helper functions to establish TLS-secured HTTP/2 connections with
-//! ALPN negotiation. The resulting streams are wrapped in [`Split`] so they
+//! ALPN negotiation. The resulting streams are wrapped in
+//! [`Split`](compio_io::util::split::Split) so they
 //! can be passed directly to [`client::handshake`](crate::client::handshake)
 //! or [`server::handshake`](crate::server::handshake).
 

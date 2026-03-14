@@ -21,8 +21,8 @@ Rust unit and integration tests by exercising the server from independent HTTP/2
 ## Prerequisites
 
 - **Rust** (stable + nightly for fuzzing and memory safety)
-- **nghttp2** (`h2load`) — install via `bash crates/compio-h2/scripts/conformance/install-nghttp2.sh`
-- **h2spec** — install via `bash crates/compio-h2/scripts/conformance/install-h2spec.sh`
+- **nghttp2** (`h2load`) — install via `bash compio-h2/scripts/conformance/install-nghttp2.sh`
+- **h2spec** — install via `bash compio-h2/scripts/conformance/install-h2spec.sh`
 - **cargo-fuzz** (nightly) — `cargo install cargo-fuzz`
 
 ## Quick Start
@@ -30,7 +30,7 @@ Rust unit and integration tests by exercising the server from independent HTTP/2
 Run all external test suites:
 
 ```bash
-bash crates/compio-h2/scripts/conformance/run-all.sh
+bash compio-h2/scripts/conformance/run-all.sh
 ```
 
 This builds the h2-server example, starts it, and runs each suite sequentially.
@@ -41,13 +41,13 @@ Suites whose prerequisites are missing are skipped gracefully.
 ### h2spec Conformance
 
 ```bash
-bash crates/compio-h2/scripts/conformance/run-h2spec.sh
+bash compio-h2/scripts/conformance/run-h2spec.sh
 ```
 
 ### h2load Load Testing
 
 ```bash
-bash crates/compio-h2/scripts/conformance/run-h2load.sh
+bash compio-h2/scripts/conformance/run-h2load.sh
 ```
 
 ### Cargo Fuzz (Nightly)
@@ -62,10 +62,10 @@ cargo +nightly fuzz run fuzz_frame_header -- -max_total_time=60
 ### Memory Safety
 
 ```bash
-bash crates/compio-h2/scripts/memleak/miri.sh       # Miri (pure logic)
-bash crates/compio-h2/scripts/memleak/asan.sh        # ASan + LSan
-bash crates/compio-h2/scripts/memleak/soak.sh        # RSS soak test
-bash crates/compio-h2/scripts/memleak/soak.sh --asan # Soak + ASan
+bash compio-h2/scripts/memleak/miri.sh        # Miri (pure logic)
+bash compio-h2/scripts/memleak/asan.sh        # ASan + LSan
+bash compio-h2/scripts/memleak/soak.sh        # RSS soak test
+bash compio-h2/scripts/memleak/soak.sh --asan # Soak + ASan
 ```
 
 ## Environment Variables
@@ -103,7 +103,7 @@ All `run-*.sh` scripts source `conformance/lib.sh`, which provides:
 ## Directory Structure
 
 ```
-crates/compio-h2/
+compio-h2/
 ├── fuzz/                       # cargo-fuzz targets
 │   ├── Cargo.toml
 │   └── fuzz_targets/
