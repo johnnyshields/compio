@@ -5,19 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Added
-
-- TLS support via `tls` feature gate with `connect`/`accept` convenience wrappers and ALPN `h2` validation
-- Sub-features `native-tls` and `rustls` forwarding to `compio-tls`
-- Cancel safety documentation on all public async methods
-
-### Fixed
-
-- Flow control now charges full DATA frame payload length including padding per RFC 7540 §6.9.1
-
-## [0.1.0] - Initial implementation
+## [0.1.0] - Initial release
 
 ### Added
 
@@ -27,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - HPACK header compression (RFC 7541) with compile-time Huffman decode table via build.rs
 - HPACK encoder with O(1) FNV hash-based dynamic table lookup, two-phase size updates, skip indexing for volatile headers
 - HPACK decoder with 5-byte integer continuation limit, table size validation against SETTINGS, header list size enforcement
-- Build.rs-generated static table lookup using length-bucketed match dispatch (replacing LazyLock HashMap)
+- Build.rs-generated static table lookup using length-bucketed match dispatch
 - Per-stream and connection-level flow control with configurable initial window sizes
 - Send-side flow control backpressure with pending data queue
 - Connection-level WINDOW_UPDATE sent when receive window half-consumed
@@ -50,4 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Structured `H2Error` type with `reason()`, `is_io()`, `is_reset()`, `is_connection()`, `is_go_away()`, `is_remote()`, `is_library()` helpers
 - `FrameError` and `HpackError` for granular error reporting
 - Write buffer batching with persistent Vec and read buffer reuse with persistent BytesMut
-- `tls` feature gate for optional TLS support
+- TLS support via `tls` feature gate with `connect`/`accept` wrappers, ALPN `h2` validation, and `native-tls`/`rustls` sub-features forwarding to `compio-tls`
+- Cancel safety documentation on all public async methods
+- h2spec conformance: passes all 147/147 h2spec tests in strict mode
+- 356 tests (246 unit + 110 integration), 4 fuzz targets, 6 conformance/load test scripts

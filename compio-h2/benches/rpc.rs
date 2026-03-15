@@ -19,7 +19,12 @@ async fn h2_crate_server_loop(listener: tokio::net::TcpListener) {
         };
         let _ = stream.set_nodelay(true);
         tokio::spawn(async move {
-            let Ok(mut conn) = h2::server::handshake(stream).await else {
+            let Ok(mut conn) = h2::server::Builder::new()
+                .initial_window_size(1 << 20)
+                .initial_connection_window_size(1 << 20)
+                .handshake(stream)
+                .await
+            else {
                 return;
             };
             while let Some(Ok((request, mut respond))) = conn.accept().await {
@@ -44,7 +49,12 @@ async fn h2_crate_server_loop(listener: tokio::net::TcpListener) {
 async fn h2_crate_client_connect(addr: std::net::SocketAddr) -> h2::client::SendRequest<Bytes> {
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     stream.set_nodelay(true).unwrap();
-    let (send_req, conn) = h2::client::handshake(stream).await.unwrap();
+    let (send_req, conn) = h2::client::Builder::new()
+        .initial_window_size(1 << 20)
+        .initial_connection_window_size(1 << 20)
+        .handshake(stream)
+        .await
+        .unwrap();
     tokio::spawn(async move {
         let _ = conn.await;
     });

@@ -266,14 +266,14 @@ impl ConnShared {
     }
 
     /// Write DATA frame(s) to the write buffer, consuming flow control.
-    /// Returns Ok(true) if fully sent, Ok(false) if nothing could be sent
-    /// (flow control blocked).
+    /// Returns `Ok(n)` where `n` is the number of bytes encoded. Returns
+    /// `Ok(0)` when flow control is fully blocked.
     pub(crate) fn encode_data(
         &mut self,
         stream_id: StreamId,
         data: &Bytes,
         end_stream: bool,
-    ) -> Result<bool, H2Error> {
+    ) -> Result<usize, H2Error> {
         let data_len = data.len() as u32;
 
         // Check flow control
@@ -287,27 +287,27 @@ impl ConnShared {
             std::cmp::min(data_len, std::cmp::min(conn_avail, stream_avail)) as usize;
 
         if !data.is_empty() && sendable == 0 {
-            return Ok(false); // Flow control blocked
+            return Ok(0); // Flow control blocked
         }
 
-        if sendable < data.len() && !data.is_empty() {
-            return Ok(false); // Partial send not supported in direct path
-        }
+        // Only set END_STREAM if we're sending everything
+        let all_sent = sendable >= data.len();
+        let actually_end_stream = end_stream && all_sent;
 
-        // Consume flow control
-        if data_len > 0 {
+        // Consume flow control for the sendable portion
+        if sendable > 0 {
             self.conn_send_flow
-                .consume(data_len)
+                .consume(sendable as u32)
                 .map_err(|_| H2Error::connection(Reason::FlowControlError))?;
             if let Some(stream) = self.streams.get_mut(&stream_id) {
                 stream
                     .send_flow
-                    .consume(data_len)
+                    .consume(sendable as u32)
                     .map_err(|_| H2Error::stream(stream_id.value(), Reason::FlowControlError))?;
             }
         }
 
-        if end_stream {
+        if actually_end_stream {
             if let Some(stream) = self.streams.get_mut(&stream_id) {
                 stream.state = stream.state.send_end_stream()?;
             }
@@ -324,12 +324,12 @@ impl ConnShared {
             self.write_buf.extend_from_slice(&header.encode());
         } else {
             let mut offset = 0;
-            while offset < data.len() {
-                let end = std::cmp::min(offset + max_frame, data.len());
+            while offset < sendable {
+                let end = std::cmp::min(offset + max_frame, sendable);
                 let chunk = &data[offset..end];
-                let is_last = end == data.len();
+                let is_last = end == sendable;
                 let mut flags = 0u8;
-                if end_stream && is_last {
+                if actually_end_stream && is_last {
                     flags |= 0x1;
                 }
                 let header =
@@ -340,7 +340,7 @@ impl ConnShared {
             }
         }
 
-        Ok(true)
+        Ok(sendable)
     }
 
     /// Write RST_STREAM frame to the write buffer.

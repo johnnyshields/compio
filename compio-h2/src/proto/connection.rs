@@ -344,9 +344,9 @@ fn encode_data_frames(
     end_stream: bool,
 ) -> Result<(), H2Error> {
     // Reuse ConnShared::encode_data which handles flow control + frame encoding.
-    // It returns Ok(false) if flow control blocked, but our caller pre-checks capacity.
+    // Returns bytes sent; caller pre-checks capacity so we expect full send.
     let sent = s.encode_data(stream_id, &data, end_stream)?;
-    debug_assert!(sent || data.is_empty(), "caller should have checked flow control");
+    debug_assert!(sent == data.len() || data.is_empty(), "caller should have checked flow control");
     Ok(())
 }
 

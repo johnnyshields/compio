@@ -181,32 +181,42 @@ impl SendStream {
         let len = data.len() as u32;
         self.reserved = self.reserved.saturating_sub(len);
 
-        // Try to encode directly into write buffer (fast path)
-        {
+        // Try to encode directly into write buffer (fast path with partial send support)
+        let remaining = {
             let mut s = self.state.borrow_mut();
             s.check_error()?;
-            if s.encode_data(self.stream_id, &data, end_of_stream)? {
-                s.wake_io();
-                return Ok(());
+            let mut offset = 0;
+            loop {
+                let sent = s.encode_data(self.stream_id, &data.slice(offset..), end_of_stream)?;
+                offset += sent;
+                if offset >= data.len() {
+                    s.wake_io();
+                    return Ok(());
+                }
+                if sent == 0 {
+                    break; // Flow control fully blocked
+                }
             }
-        }
+            s.wake_io();
+            data.slice(offset..)
+        };
 
-        // Flow control blocked — queue as pending send and wait for IO driver
+        // Flow control blocked on remainder — queue as pending send
         {
             let mut s = self.state.borrow_mut();
             // Enforce send buffer limit
-            if s.pending_send_bytes + data.len() > s.max_send_buffer_size {
+            if s.pending_send_bytes + remaining.len() > s.max_send_buffer_size {
                 return Err(H2Error::Protocol(format!(
                     "send buffer full: {} + {} > {} bytes",
                     s.pending_send_bytes,
-                    data.len(),
+                    remaining.len(),
                     s.max_send_buffer_size
                 )));
             }
-            s.pending_send_bytes += data.len();
+            s.pending_send_bytes += remaining.len();
             s.pending_sends.push(crate::state::PendingSend {
                 stream_id: self.stream_id,
-                data,
+                data: remaining,
                 end_stream: end_of_stream,
                 waker: None,
             });
@@ -214,8 +224,6 @@ impl SendStream {
         }
 
         // Wait for the IO driver to flush this pending send.
-        // The IO driver removes the item from pending_sends when flushed,
-        // then wakes our waker. If we don't find our item, it was sent.
         poll_fn(|cx| {
             let mut s = self.state.borrow_mut();
             s.check_error()?;
