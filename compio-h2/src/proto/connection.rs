@@ -225,22 +225,6 @@ async fn io_flush_loop<W: AsyncWrite>(
             // Fulfill pending capacity reservations
             s.fulfill_pending_capacity();
 
-            // Send connection-level WINDOW_UPDATE
-            let threshold = (s.conn_recv_flow.initial_window_size() / 2) as u32;
-            if s.conn_recv_consumed > 0 && s.conn_recv_consumed >= threshold {
-                let increment = s.conn_recv_consumed;
-                s.encode_window_update(StreamId::ZERO, increment);
-                let _ = s.conn_recv_flow.release(increment);
-                s.conn_recv_consumed = 0;
-            }
-
-            // Send stream-level WINDOW_UPDATEs
-            let updates = s.streams.streams_needing_window_update(2);
-            for (stream_id, increment) in updates {
-                s.encode_window_update(stream_id, increment);
-                s.streams.reset_released(&stream_id, increment);
-            }
-
             // GC closed streams
             s.streams.gc_closed();
 
@@ -248,7 +232,18 @@ async fn io_flush_loop<W: AsyncWrite>(
             s.notify_ready_waiters();
         }
 
-        // Flush write buffer to TCP (outside the lock)
+        // Piggyback WINDOW_UPDATEs onto real data writes: only encode
+        // them when write_buf already has user data, so they share the
+        // same TCP write. This avoids standalone small TCP writes that
+        // cause ~43ms stalls on WSL2/loopback.
+        // When write_buf is empty, WINDOW_UPDATEs are deferred until
+        // the next flush that carries real data.
+        {
+            let mut s = state.borrow_mut();
+            if !s.write_buf.is_empty() {
+                encode_window_updates(&mut s);
+            }
+        }
         flush_write_buf(state, writer_io).await?;
 
         // Graceful shutdown check (after flush so GOAWAY reaches the peer)
@@ -280,6 +275,25 @@ async fn flush_write_buf<W: AsyncWrite>(
     };
     let BufResult(result, _) = writer_io.write_all(buf).await;
     result.map_err(H2Error::from)
+}
+
+/// Encode pending WINDOW_UPDATEs into write_buf (connection + stream level).
+fn encode_window_updates(s: &mut ConnShared) {
+    // Connection-level WINDOW_UPDATE
+    let threshold = (s.conn_recv_flow.initial_window_size() / 2) as u32;
+    if s.conn_recv_consumed > 0 && s.conn_recv_consumed >= threshold {
+        let increment = s.conn_recv_consumed;
+        s.encode_window_update(StreamId::ZERO, increment);
+        let _ = s.conn_recv_flow.release(increment);
+        s.conn_recv_consumed = 0;
+    }
+
+    // Stream-level WINDOW_UPDATEs
+    let updates = s.streams.streams_needing_window_update(2);
+    for (stream_id, increment) in updates {
+        s.encode_window_update(stream_id, increment);
+        s.streams.reset_released(&stream_id, increment);
+    }
 }
 
 /// Try to flush pending DATA sends that now fit in flow control windows.
