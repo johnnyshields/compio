@@ -309,14 +309,20 @@ impl StreamStore {
     }
 
     /// Collect stream IDs that need a WINDOW_UPDATE based on released bytes.
-    /// Yield (stream_id, increment) pairs.
-    pub fn streams_needing_window_update(&self) -> Vec<(StreamId, u32)> {
+    ///
+    /// Only includes streams where released bytes meet the threshold:
+    /// `released >= initial_recv_window / threshold_ratio` (minimum 1 byte).
+    /// This prevents eager per-chunk WINDOW_UPDATEs that cause write stalls.
+    /// Use `threshold_ratio = 2` for 50%, matching connection-level behavior.
+    pub fn streams_needing_window_update(&self, threshold_ratio: u32) -> Vec<(StreamId, u32)> {
         let mut result = Vec::new();
         for (id, stream) in &self.streams {
             if stream.state.is_closed() {
                 continue;
             }
-            if stream.released > 0 {
+            let threshold =
+                (stream.recv_flow.initial_window_size() / threshold_ratio as i32).max(1) as u32;
+            if stream.released >= threshold {
                 result.push((*id, stream.released));
             }
         }

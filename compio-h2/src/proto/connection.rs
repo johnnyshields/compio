@@ -235,7 +235,7 @@ async fn io_flush_loop<W: AsyncWrite>(
             }
 
             // Send stream-level WINDOW_UPDATEs
-            let updates = s.streams.streams_needing_window_update();
+            let updates = s.streams.streams_needing_window_update(2);
             for (stream_id, increment) in updates {
                 s.encode_window_update(stream_id, increment);
                 s.streams.reset_released(&stream_id, increment);
