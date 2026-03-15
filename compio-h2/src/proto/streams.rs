@@ -330,9 +330,18 @@ impl StreamStore {
     }
 
     /// Apply a release to a stream (from the application's FlowControl handle).
-    pub fn apply_release(&mut self, stream_id: &StreamId, amount: u32) {
+    /// Returns `true` if the stream now has enough released bytes to warrant
+    /// a WINDOW_UPDATE (crossed the threshold), so the caller can decide
+    /// whether to wake the IO loop.
+    pub fn apply_release(&mut self, stream_id: &StreamId, amount: u32) -> bool {
         if let Some(stream) = self.streams.get_mut(stream_id) {
+            let was = stream.released;
             stream.released += amount;
+            let threshold =
+                (stream.recv_flow.initial_window_size() / 2).max(1) as u32;
+            was < threshold && stream.released >= threshold
+        } else {
+            false
         }
     }
 

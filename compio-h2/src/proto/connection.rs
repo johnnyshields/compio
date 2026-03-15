@@ -246,7 +246,6 @@ async fn io_flush_loop<W: AsyncWrite>(
 
             // Wake ready waiters
             s.notify_ready_waiters();
-
         }
 
         // Flush write buffer to TCP (outside the lock)

@@ -44,8 +44,10 @@ impl RecvFlowControl {
         }
         self.unreleased -= sz;
         let mut s = self.state.borrow_mut();
-        s.streams.apply_release(&self.stream_id, sz);
-        s.wake_io(); // IO task will send WINDOW_UPDATE
+        let crossed_threshold = s.streams.apply_release(&self.stream_id, sz);
+        if crossed_threshold {
+            s.wake_io(); // IO task will send WINDOW_UPDATE
+        }
         Ok(())
     }
 
