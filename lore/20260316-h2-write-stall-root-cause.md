@@ -59,16 +59,24 @@ The delay accumulates across steps 2-6. When the server sends multiple frames ba
 
 2. **Lazy IO wake on release_capacity** (share.rs): Only wake the io_flush_loop when the threshold is actually crossed, not on every `release_capacity()` call. Reduces unnecessary IO loop iterations.
 
+### What does NOT cause the stall
+
+1. **NOT io_uring submission overhead**: `probe_uring` shows write_all(13B) takes 3µs via io_uring SEND_ZC.
+2. **NOT runtime task scheduling**: Multi-threaded test (separate threads for client and server) shows identical 43ms stalls.
+3. **NOT TCP_NODELAY/Nagle**: Both sides set nodelay. TCP_QUICKACK also tested with no effect.
+4. **NOT the write path**: Both blocking write(2) and io_uring SEND_ZC take ~3µs for 13B.
+
+### What DOES cause the stall
+
+The stall_trace phase breakdown shows `wait=43340µs` — the client sends the request in 2µs but waits 43ms for the SERVER's response. The server delays 43ms before responding to every 8th request (when WINDOW_UPDATE threshold is crossed).
+
+The stall is in the **network interaction pattern**: a standalone small WINDOW_UPDATE write from the server, followed by the response write. Despite TCP_NODELAY, something in WSL2's TCP/virtio networking adds ~43ms when a small packet is followed by a larger response on the same connection. tokio h2 avoids this because its Codec/BufWriter coalesces the WINDOW_UPDATE with the response into a single syscall.
+
 ### What would fix it fully
 
-**compio-runtime level** (not in this branch):
+**BufWriter wrapping** (attempted, not landed): Wrapping the write side in `compio_io::BufWriter` would coalesce the 13-byte WINDOW_UPDATE with subsequent DATA frames into a single TCP write. However, this requires careful flush management — never flushing standalone WINDOW_UPDATEs but always flushing when there's real data, and handling the case where the peer is flow-control-blocked and needs the WINDOW_UPDATE immediately.
 
-- Before calling `submit_and_wait()`, poll all woken tasks first. This would let the io_flush_loop run and queue its SEND_ZC before the runtime blocks waiting for CQEs.
-- Or: submit all queued SQEs eagerly in `push_raw()` instead of deferring to the event loop poll. This would let the WINDOW_UPDATE write go out immediately when queued, without waiting for the next event loop iteration.
-
-**H2 protocol level** (alternative):
-
-- Encode WINDOW_UPDATEs directly in the reader task (into write_buf) instead of waking the io_flush_loop. The next io_flush_loop iteration triggered by user data would then flush them along with the real write. But this creates ownership complexity since the reader and io_flush_loop both modify write_buf.
+The key challenge: we must flush WINDOW_UPDATEs for flow-control-blocked peers, but must NOT flush them standalone for the echo benchmark. A potential solution is a delayed flush: buffer the WINDOW_UPDATE, set a short timer (1-5ms), and flush either when real data arrives or the timer fires.
 
 ## Diagnostic tools
 
