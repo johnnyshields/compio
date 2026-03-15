@@ -60,7 +60,17 @@ trap 'rm -f "$TMPFILE"' EXIT
 if [[ "${ASAN_VERBOSE:-0}" == "1" ]]; then
     cargo +nightly test -Zbuild-std --target "$TARGET" "${EXTRA_ARGS[@]}" 2>&1 | tee "$TMPFILE"
 else
-    cargo +nightly test -Zbuild-std --target "$TARGET" "${EXTRA_ARGS[@]}" > "$TMPFILE" 2>&1 || true
+    CARGO_EXIT=0
+    cargo +nightly test -Zbuild-std --target "$TARGET" "${EXTRA_ARGS[@]}" > "$TMPFILE" 2>&1 || CARGO_EXIT=$?
+
+    # If cargo failed and produced no test results, it's a compilation error — show full output.
+    if [[ "$CARGO_EXIT" -ne 0 ]] && ! grep -q '^test result:' "$TMPFILE"; then
+        cat "$TMPFILE"
+        echo ""
+        echo "FAILED: cargo exited with code $CARGO_EXIT (compilation error?)"
+        exit "$CARGO_EXIT"
+    fi
+
     # Show only error headers, summaries, and test results.
     grep -E '(^==[0-9]+==(ERROR|WARNING)|SUMMARY:|test result:)' "$TMPFILE" || true
 fi
@@ -88,7 +98,7 @@ if [[ "$SUPPRESS_MODE" == "1" ]]; then
         while IFS= read -r pattern; do
             [[ -z "$pattern" ]] && continue
             # Skip if already covered by an existing suppression.
-            if echo "$EXISTING" | grep -qF "$pattern"; then
+            if echo "$EXISTING" | grep -qxF "$pattern"; then
                 continue
             fi
             echo "leak:$pattern" >> "$SUPP_FILE"

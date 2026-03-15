@@ -1,4 +1,4 @@
-# LSan suppression file for known leaks in compio.
+# ASan/LSan suppression file for known leaks in compio.
 # See https://clang.llvm.org/docs/AddressSanitizer.html#suppressing-memory-leaks
 # Patterns are substring-matched against symbolized stack frames.
 
