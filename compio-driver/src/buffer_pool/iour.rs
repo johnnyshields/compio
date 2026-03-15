@@ -6,7 +6,6 @@ use std::{
     borrow::{Borrow, BorrowMut},
     fmt::{Debug, Formatter},
     io,
-    mem::ManuallyDrop,
     ops::{Deref, DerefMut},
     rc::Rc,
 };
@@ -16,7 +15,7 @@ use io_uring_buf_ring::IoUringBufRing;
 pub use {BufferPool as IoUringBufferPool, OwnedBuffer as IoUringOwnedBuffer};
 
 struct BufferPoolInner {
-    buf_ring: ManuallyDrop<IoUringBufRing<Vec<u8>>>,
+    buf_ring: IoUringBufRing<Vec<u8>>,
 }
 
 impl BufferPoolInner {
@@ -24,17 +23,6 @@ impl BufferPoolInner {
         // SAFETY: 0 is always valid length. We just want to get the buffer once and
         // return it immediately.
         unsafe { self.buf_ring.get_buf(buffer_id, 0) };
-    }
-}
-
-impl Drop for BufferPoolInner {
-    fn drop(&mut self) {
-        // SAFETY: free mmap + buffers without unregistering from io_uring
-        // (which may already be dropped).
-        unsafe {
-            let ring = ManuallyDrop::take(&mut self.buf_ring);
-            IoUringBufRing::drop(ring);
-        }
     }
 }
 
@@ -56,9 +44,7 @@ impl Debug for BufferPool {
 impl BufferPool {
     pub(crate) fn new(buf_ring: IoUringBufRing<Vec<u8>>) -> Self {
         Self {
-            inner: Rc::new(BufferPoolInner {
-                buf_ring: ManuallyDrop::new(buf_ring),
-            }),
+            inner: Rc::new(BufferPoolInner { buf_ring }),
         }
     }
 
@@ -68,11 +54,7 @@ impl BufferPool {
 
     pub(crate) fn into_inner(self) -> Result<IoUringBufRing<Vec<u8>>, Self> {
         Rc::try_unwrap(self.inner)
-            .map(|mut inner| {
-                let ring = unsafe { ManuallyDrop::take(&mut inner.buf_ring) };
-                std::mem::forget(inner);
-                ring
-            })
+            .map(|inner| inner.buf_ring)
             .map_err(|inner| Self { inner })
     }
 
