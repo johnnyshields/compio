@@ -121,14 +121,52 @@ async fn mixed_small_large_writes() {
     assert_eq!(buf, vec![3u8; 100]);
 }
 
+/// Small vectored write (below threshold) uses regular send.
+#[compio_macros::test]
+async fn small_vectored_write() {
+    use compio_io::AsyncWrite;
+
+    let (mut tx, mut rx) = echo_pair().await;
+
+    // Two small buffers totaling 14 bytes — below 8KB threshold
+    let bufs = [vec![0xAAu8; 7], vec![0xBBu8; 7]];
+    let BufResult(res, _) = AsyncWrite::write_vectored(&mut tx, bufs).await;
+    let n = res.unwrap();
+    assert_eq!(n, 14);
+
+    let BufResult(res, buf) = rx.read_exact(Vec::with_capacity(14)).await;
+    res.unwrap();
+    assert_eq!(&buf[..7], &[0xAAu8; 7]);
+    assert_eq!(&buf[7..], &[0xBBu8; 7]);
+}
+
+/// Large vectored write (above threshold) uses zerocopy.
+#[compio_macros::test]
+async fn large_vectored_write() {
+    use compio_io::AsyncWrite;
+
+    let (mut tx, mut rx) = echo_pair().await;
+
+    // Two 8KB buffers = 16KB total — above threshold
+    let bufs = [vec![0xCCu8; 8192], vec![0xDDu8; 8192]];
+    let BufResult(res, _) = AsyncWrite::write_vectored(&mut tx, bufs).await;
+    let n = res.unwrap();
+    assert_eq!(n, 16384);
+
+    let BufResult(res, buf) = rx.read_exact(Vec::with_capacity(16384)).await;
+    res.unwrap();
+    assert_eq!(&buf[..8192], &[0xCCu8; 8192]);
+    assert_eq!(&buf[8192..], &[0xDDu8; 8192]);
+}
+
 /// Small write with split halves (OwnedWriteHalf).
 #[compio_macros::test]
 async fn small_write_split_halves() {
     use compio_io::util::Splittable;
 
     let (tx, rx) = echo_pair().await;
-    let (_rtx, mut wtx) = compio_io::util::Splittable::split(tx);
-    let (mut rrx, _wrx) = compio_io::util::Splittable::split(rx);
+    let (_rtx, mut wtx) = Splittable::split(tx);
+    let (mut rrx, _wrx) = Splittable::split(rx);
 
     let payload = vec![0xABu8; 13];
     let BufResult(res, _) = wtx.write_all(payload.clone()).await;

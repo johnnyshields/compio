@@ -493,8 +493,12 @@ impl AsyncWrite for &TcpStream {
 
     #[inline]
     async fn write_vectored<T: IoVectoredBuf>(&mut self, buf: T) -> BufResult<usize, T> {
-        let BufResult(res, fut) = self.send_zerocopy_vectored(buf, 0).await;
-        BufResult(res, fut.await)
+        if buf.total_len() >= ZEROCOPY_THRESHOLD {
+            let BufResult(res, fut) = self.send_zerocopy_vectored(buf, 0).await;
+            BufResult(res, fut.await)
+        } else {
+            self.inner.send_vectored(buf, 0).await
+        }
     }
 
     #[inline]
