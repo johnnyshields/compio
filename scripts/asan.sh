@@ -8,14 +8,14 @@
 # Usage:
 #   ./scripts/asan.sh <target>                # run all tests
 #   ./scripts/asan.sh <target> -- timeout     # filter by test name
-#   ./scripts/asan.sh --suppress <target>     # run and add all detected leaks to lsan.supp
+#   ./scripts/asan.sh --suppress <target>     # run and add all detected leaks to asan.supp
 #
 # Set ASAN_VERBOSE=1 to see full cargo test output.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SUPP_FILE="$SCRIPT_DIR/lsan.supp"
+SUPP_FILE="$SCRIPT_DIR/asan.supp"
 SUPPRESS_MODE=0
 
 if [[ "${1:-}" == "--suppress" ]]; then
