@@ -232,17 +232,12 @@ async fn io_flush_loop<W: AsyncWrite>(
             s.notify_ready_waiters();
         }
 
-        // Piggyback WINDOW_UPDATEs onto real data writes: only encode
-        // them when write_buf already has user data, so they share the
-        // same TCP write. This avoids standalone small TCP writes that
-        // cause ~43ms stalls on WSL2/loopback.
-        // When write_buf is empty, WINDOW_UPDATEs are deferred until
-        // the next flush that carries real data.
+        // Encode WINDOW_UPDATEs after user data (from flush_pending_sends)
+        // so they share the same write_buf → same TCP write when both
+        // are present.
         {
             let mut s = state.borrow_mut();
-            if !s.write_buf.is_empty() {
-                encode_window_updates(&mut s);
-            }
+            encode_window_updates(&mut s);
         }
         flush_write_buf(state, writer_io).await?;
 
