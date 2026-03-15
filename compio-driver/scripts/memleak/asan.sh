@@ -11,13 +11,13 @@
 #   rustup component add rust-src --toolchain nightly
 #
 # Usage:
-#   ./compio-driver/scripts/memleak/asan.sh                # run all tests
-#   ./compio-driver/scripts/memleak/asan.sh -- timeout      # filter by test name
+#   ./compio-driver/scripts/memleak/asan.sh <target>                # run all tests
+#   ./compio-driver/scripts/memleak/asan.sh <target> -- timeout     # filter by test name
 
 set -euo pipefail
 
-# Detect host target triple
-TARGET=$(rustc -vV | grep host | awk '{print $2}')
+TARGET="${1:?Usage: $0 <target-triple> [-- test-filter]}"
+shift
 
 # ASan + LSan: detect memory errors and leaks at process exit.
 export RUSTFLAGS="${RUSTFLAGS:-} -Zsanitizer=address"
