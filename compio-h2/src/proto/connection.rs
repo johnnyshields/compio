@@ -302,7 +302,7 @@ fn flush_pending_sends(s: &mut ConnShared) {
         if item.data.is_empty() || sendable == item.data.len() {
             // Full send — encode and wake the sender
             s.pending_send_bytes -= item.data.len();
-            let _result = encode_data_frames(s, item.stream_id, item.data, item.end_stream);
+            let _ = encode_data_frames(s, item.stream_id, item.data, item.end_stream);
             if let Some(waker) = item.waker.take() {
                 waker.wake();
             }
