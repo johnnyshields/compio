@@ -11,6 +11,11 @@ use crate::{
     proto::flow_control::FlowControl,
 };
 
+/// WINDOW_UPDATE threshold divisor: emit a WINDOW_UPDATE when released bytes
+/// reach `initial_window / WINDOW_UPDATE_THRESHOLD_RATIO` (i.e. 50% consumed).
+/// Used in both `streams_needing_window_update` and `apply_release`.
+pub(crate) const WINDOW_UPDATE_THRESHOLD_RATIO: i32 = 2;
+
 /// Stream state machine per RFC 7540 Section 5.1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamState {
@@ -314,14 +319,14 @@ impl StreamStore {
     /// `released >= initial_recv_window / threshold_ratio` (minimum 1 byte).
     /// This prevents eager per-chunk WINDOW_UPDATEs that cause write stalls.
     /// Use `threshold_ratio = 2` for 50%, matching connection-level behavior.
-    pub fn streams_needing_window_update(&self, threshold_ratio: u32) -> Vec<(StreamId, u32)> {
+    pub fn streams_needing_window_update(&self) -> Vec<(StreamId, u32)> {
         let mut result = Vec::new();
         for (id, stream) in &self.streams {
             if stream.state.is_closed() {
                 continue;
             }
             let threshold =
-                (stream.recv_flow.initial_window_size() / threshold_ratio as i32).max(1) as u32;
+                (stream.recv_flow.initial_window_size() / WINDOW_UPDATE_THRESHOLD_RATIO).max(1) as u32;
             if stream.released >= threshold {
                 result.push((*id, stream.released));
             }
@@ -338,7 +343,7 @@ impl StreamStore {
             let was = stream.released;
             stream.released += amount;
             let threshold =
-                (stream.recv_flow.initial_window_size() / 2).max(1) as u32;
+                (stream.recv_flow.initial_window_size() / WINDOW_UPDATE_THRESHOLD_RATIO).max(1) as u32;
             was < threshold && stream.released >= threshold
         } else {
             false

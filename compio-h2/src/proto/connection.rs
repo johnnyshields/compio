@@ -280,7 +280,8 @@ async fn flush_write_buf<W: AsyncWrite>(
 /// Encode pending WINDOW_UPDATEs into write_buf (connection + stream level).
 fn encode_window_updates(s: &mut ConnShared) {
     // Connection-level WINDOW_UPDATE
-    let threshold = (s.conn_recv_flow.initial_window_size() / 2) as u32;
+    let threshold = (s.conn_recv_flow.initial_window_size()
+        / crate::proto::streams::WINDOW_UPDATE_THRESHOLD_RATIO) as u32;
     if s.conn_recv_consumed > 0 && s.conn_recv_consumed >= threshold {
         let increment = s.conn_recv_consumed;
         s.encode_window_update(StreamId::ZERO, increment);
@@ -289,7 +290,7 @@ fn encode_window_updates(s: &mut ConnShared) {
     }
 
     // Stream-level WINDOW_UPDATEs
-    let updates = s.streams.streams_needing_window_update(2);
+    let updates = s.streams.streams_needing_window_update();
     for (stream_id, increment) in updates {
         s.encode_window_update(stream_id, increment);
         s.streams.reset_released(&stream_id, increment);
@@ -597,11 +598,10 @@ fn handle_settings(s: &mut ConnShared, settings: frame::Settings) -> Result<(), 
 
     s.settings.apply_remote(&settings);
 
-    if s.is_client {
-        if let Some(max) = settings.max_concurrent_streams() {
+    if s.is_client
+        && let Some(max) = settings.max_concurrent_streams() {
             s.streams.set_max_concurrent_streams(max);
         }
-    }
 
     if let Some(new_window) = settings.initial_window_size() {
         let new_window = new_window as i32;
@@ -666,18 +666,14 @@ fn handle_window_update(s: &mut ConnShared, wu: frame::WindowUpdate) -> Result<(
             .map_err(|_| H2Error::connection(Reason::FlowControlError))?;
         // Wake all senders — connection window opened
         s.wake_all_senders();
-    } else {
-        if let Some(stream) = s.streams.get_mut(&stream_id) {
-            stream
-                .send_flow
-                .apply_window_update(increment)
-                .map_err(|_| H2Error::stream(stream_id.value(), Reason::FlowControlError))?;
-            s.wake_send(&stream_id);
-        } else {
-            if s.is_idle_peer_stream(&stream_id) {
-                return Err(H2Error::connection(Reason::ProtocolError));
-            }
-        }
+    } else if let Some(stream) = s.streams.get_mut(&stream_id) {
+        stream
+            .send_flow
+            .apply_window_update(increment)
+            .map_err(|_| H2Error::stream(stream_id.value(), Reason::FlowControlError))?;
+        s.wake_send(&stream_id);
+    } else if s.is_idle_peer_stream(&stream_id) {
+        return Err(H2Error::connection(Reason::ProtocolError));
     }
     Ok(())
 }

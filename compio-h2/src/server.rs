@@ -111,15 +111,14 @@ impl ServerConnection {
 
         let stream_ids: Vec<StreamId> = s.streams.iter_ids().collect();
         for id in &stream_ids {
-            if let Some(stream) = s.streams.get_mut(id) {
-                if !stream.state.is_closed() {
+            if let Some(stream) = s.streams.get_mut(id)
+                && !stream.state.is_closed() {
                     stream.state = stream.state.reset();
                     stream
                         .data_buf
                         .push_back(Err(H2Error::connection(reason)));
                     stream.recv_closed = true;
                 }
-            }
         }
         s.going_away = true;
         s.wake_all_senders();

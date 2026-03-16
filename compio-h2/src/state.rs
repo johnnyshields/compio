@@ -307,11 +307,10 @@ impl ConnShared {
             }
         }
 
-        if end_stream {
-            if let Some(stream) = self.streams.get_mut(&stream_id) {
+        if end_stream
+            && let Some(stream) = self.streams.get_mut(&stream_id) {
                 stream.state = stream.state.send_end_stream()?;
             }
-        }
 
         // Write DATA frames to buffer
         let max_frame = self.settings.remote().max_frame_size as usize;
@@ -536,14 +535,13 @@ fn write_headers_with_continuation_to_buf(
 pub(crate) fn headers_to_header_map(decoded: &[DecodedHeader]) -> http::HeaderMap {
     let mut map = http::HeaderMap::new();
     for dh in decoded {
-        if !dh.name.starts_with(b":") {
-            if let (Ok(name), Ok(value)) = (
+        if !dh.name.starts_with(b":")
+            && let (Ok(name), Ok(value)) = (
                 http::header::HeaderName::from_bytes(&dh.name),
                 http::header::HeaderValue::from_bytes(&dh.value),
             ) {
                 map.append(name, value);
             }
-        }
     }
     map
 }
@@ -556,11 +554,10 @@ pub(crate) fn has_no_pseudo_headers(decoded: &[DecodedHeader]) -> bool {
 /// Parse content-length from decoded headers.
 pub(crate) fn parse_content_length(headers: &[DecodedHeader]) -> Option<u64> {
     for dh in headers {
-        if dh.name.eq_ignore_ascii_case(b"content-length") {
-            if let Ok(s) = std::str::from_utf8(&dh.value) {
+        if dh.name.eq_ignore_ascii_case(b"content-length")
+            && let Ok(s) = std::str::from_utf8(&dh.value) {
                 return s.parse().ok();
             }
-        }
     }
     None
 }
