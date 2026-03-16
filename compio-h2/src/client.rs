@@ -90,6 +90,10 @@ pub struct SendRequest {
 
 impl SendRequest {
     /// Wait until the connection can accept a new stream.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe.
     pub async fn ready(&mut self) -> Result<(), H2Error> {
         poll_fn(|cx| {
             let mut s = self.state.borrow_mut();
@@ -109,6 +113,10 @@ impl SendRequest {
     }
 
     /// Initiate a graceful shutdown by sending a GOAWAY frame.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe.
     pub async fn shutdown(&self) -> Result<(), H2Error> {
         let mut s = self.state.borrow_mut();
         s.check_error()?;
@@ -120,6 +128,10 @@ impl SendRequest {
     }
 
     /// Set the target connection-level receive window size at runtime.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe.
     pub async fn set_target_window_size(&self, size: u32) -> Result<(), H2Error> {
         let mut s = self.state.borrow_mut();
         s.check_error()?;
@@ -140,6 +152,10 @@ impl SendRequest {
     }
 
     /// Set the initial stream-level window size via a SETTINGS frame.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe.
     pub async fn set_initial_window_size(&self, size: u32) -> Result<(), H2Error> {
         let mut s = self.state.borrow_mut();
         s.check_error()?;
@@ -174,6 +190,10 @@ impl SendRequest {
     }
 
     /// Send an HTTP/2 request.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe.
     pub async fn send_request(
         &mut self,
         request: http::Request<()>,
@@ -260,6 +280,10 @@ pub struct ResponseFuture {
 
 impl ResponseFuture {
     /// Wait for the response headers.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe.
     pub async fn await_response(self) -> Result<http::Response<RecvStream>, H2Error> {
         let (status, headers) = poll_fn(|cx| {
             let mut s = self.state.borrow_mut();
