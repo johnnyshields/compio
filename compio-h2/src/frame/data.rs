@@ -12,15 +12,18 @@ pub struct Data {
     stream_id: StreamId,
     payload: Bytes,
     flags: u8,
+    flow_controlled_len: u32,
 }
 
 impl Data {
     /// Create a new DATA frame with the given stream ID and payload.
     pub fn new(stream_id: StreamId, payload: Bytes) -> Self {
+        let flow_controlled_len = payload.len() as u32;
         Data {
             stream_id,
             payload,
             flags: 0,
+            flow_controlled_len,
         }
     }
 
@@ -60,6 +63,12 @@ impl Data {
         self.flags
     }
 
+    /// The number of bytes charged against the flow control window.
+    /// This is the full payload length including padding (per RFC 7540 §6.9.1).
+    pub fn flow_controlled_len(&self) -> u32 {
+        self.flow_controlled_len
+    }
+
     /// Decode a DATA frame from the payload bytes (after the 9-byte header).
     pub fn decode(stream_id: StreamId, flags: u8, payload: Bytes) -> Result<Self, FrameError> {
         if stream_id.is_zero() {
@@ -67,6 +76,8 @@ impl Data {
                 "DATA frame with stream ID 0".into(),
             ));
         }
+
+        let flow_controlled_len = payload.len() as u32;
 
         let actual_payload = if flags & FLAG_PADDED != 0 {
             if payload.is_empty() {
@@ -89,6 +100,7 @@ impl Data {
             stream_id,
             payload: actual_payload,
             flags,
+            flow_controlled_len,
         })
     }
 
@@ -130,5 +142,25 @@ mod tests {
         assert_eq!(decoded.stream_id().value(), 1);
         assert!(decoded.is_end_stream());
         assert_eq!(decoded.payload().as_ref(), b"hello");
+    }
+
+    #[test]
+    fn test_non_padded_flow_controlled_len() {
+        let frame = Data::decode(StreamId::new(1), 0, Bytes::from_static(b"hello")).unwrap();
+        assert_eq!(frame.flow_controlled_len(), 5);
+        assert_eq!(frame.payload().len(), 5);
+    }
+
+    #[test]
+    fn test_padded_flow_controlled_len() {
+        // Build a padded DATA frame payload:
+        // [pad_len=3] [data: "hi"] [padding: 0,0,0]
+        let raw_payload = Bytes::from_static(&[3, b'h', b'i', 0, 0, 0]);
+        let frame = Data::decode(StreamId::new(1), FLAG_PADDED, raw_payload).unwrap();
+
+        // flow_controlled_len includes pad_len byte + data + padding = 6
+        assert_eq!(frame.flow_controlled_len(), 6);
+        // payload is just the data after stripping padding
+        assert_eq!(frame.payload().as_ref(), b"hi");
     }
 }
