@@ -84,8 +84,13 @@ pub(crate) async fn run_server_io<R: AsyncRead + 'static, W: AsyncWrite + 'stati
     let mut reader = configure_reader(reader_io, &state.borrow().settings);
 
     // Server: read and validate the client connection preface.
-    let preface = reader.read_exact_bytes(frame::PREFACE.len()).await?;
-    if preface != frame::PREFACE {
+    // If the read fails (EOF, short read) or the bytes don't match, send
+    // GOAWAY(PROTOCOL_ERROR) before closing — required by RFC 9113 §3.4.
+    let preface_ok = match reader.read_exact_bytes(frame::PREFACE.len()).await {
+        Ok(buf) => buf == frame::PREFACE,
+        Err(_) => false,
+    };
+    if !preface_ok {
         let mut s = state.borrow_mut();
         s.encode_goaway(StreamId::ZERO, Reason::ProtocolError);
         drop(s);

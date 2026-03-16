@@ -22,7 +22,7 @@ use compio_h2::{
         FRAME_TYPE_WINDOW_UPDATE, Frame, Ping, RstStream, Settings, StreamId, WindowUpdate,
     },
 };
-use compio_io::AsyncWriteExt;
+use compio_io::{AsyncWrite, AsyncWriteExt};
 use compio_net::{TcpListener, TcpStream};
 
 mod common;
@@ -503,7 +503,7 @@ async fn oversized_header_list_rejected() {
 // Invalid connection preface
 // ---------------------------------------------------------------------------
 
-/// Garbage instead of HTTP/2 preface -> rejected.
+/// Garbage instead of HTTP/2 preface -> GOAWAY PROTOCOL_ERROR.
 #[compio_macros::test]
 async fn invalid_preface_rejected() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -528,9 +528,51 @@ async fn invalid_preface_rejected() {
     tcp_write(&stream, b"GET / HTTP/1.1\r\nHost: evil\r\n\r\n".to_vec()).await;
 
     let goaway = find_goaway(&stream, GOAWAY_TIMEOUT).await;
-    if let Some((_, reason)) = goaway {
-        assert_eq!(reason, Reason::ProtocolError);
-    }
+    assert!(goaway.is_some(), "expected GOAWAY for invalid preface");
+    let (_, reason) = goaway.unwrap();
+    assert_eq!(reason, Reason::ProtocolError);
+
+    let result = done_rx.recv_async().await.unwrap();
+    assert!(result.is_err());
+}
+
+/// Truncated preface (EOF before 24 bytes) -> GOAWAY PROTOCOL_ERROR.
+///
+/// This is h2spec test 3.5.2: the client sends a short invalid preface and
+/// closes the write half. The server must still send GOAWAY before closing.
+#[compio_macros::test]
+async fn truncated_preface_sends_goaway() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (done_tx, done_rx) = flume::bounded(1);
+
+    compio_runtime::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let result = ServerBuilder::new().handshake(stream).await;
+        match result {
+            Ok(mut conn) => {
+                let _ = done_tx.send(conn.closed().await);
+            }
+            Err(e) => {
+                let _ = done_tx.send(Err(e));
+            }
+        }
+    })
+    .detach();
+
+    let stream = TcpStream::connect(addr).await.unwrap();
+    // Send only 4 bytes — not a valid 24-byte preface
+    tcp_write(&stream, b"bad!".to_vec()).await;
+    // Shut down write half so the server sees EOF during read_exact_bytes
+    AsyncWrite::shutdown(&mut &stream).await.unwrap();
+
+    let goaway = find_goaway(&stream, GOAWAY_TIMEOUT).await;
+    assert!(
+        goaway.is_some(),
+        "expected GOAWAY for truncated preface (h2spec 3.5.2)"
+    );
+    let (_, reason) = goaway.unwrap();
+    assert_eq!(reason, Reason::ProtocolError);
 
     let result = done_rx.recv_async().await.unwrap();
     assert!(result.is_err());
