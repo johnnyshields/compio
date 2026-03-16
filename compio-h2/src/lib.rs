@@ -76,3 +76,8 @@ pub use proto::ping_pong::PingPong;
 pub use proto::settings::ConnSettings;
 /// Re-export stream send/receive handles and flow control.
 pub use share::{RecvFlowControl, RecvStream, SendStream};
+
+/// TLS support for HTTP/2 connections.
+#[cfg(feature = "tls")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tls")))]
+pub mod tls;
