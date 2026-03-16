@@ -71,7 +71,12 @@ pub async fn compio_h2_server_loop(listener: compio_net::TcpListener) {
         let (stream, _) = listener.accept().await.unwrap();
         stream.set_nodelay(true).unwrap();
         compio_runtime::spawn(async move {
-            let mut conn = compio_h2::server::handshake(stream).await.unwrap();
+            let mut conn = compio_h2::server::builder()
+                .initial_window_size(1 << 20)
+                .initial_connection_window_size(1 << 20)
+                .handshake(stream)
+                .await
+                .unwrap();
             while let Some(result) = conn.accept().await {
                 let (req, mut send_resp) = result.unwrap();
                 compio_runtime::spawn(async move {
@@ -104,7 +109,12 @@ pub async fn compio_h2_client_connect(
 ) -> compio_h2::client::SendRequest {
     let stream = compio_net::TcpStream::connect(addr).await.unwrap();
     stream.set_nodelay(true).unwrap();
-    let (send_req, conn) = compio_h2::client::handshake(stream).await.unwrap();
+    let (send_req, conn) = compio_h2::client::builder()
+        .initial_window_size(1 << 20)
+        .initial_connection_window_size(1 << 20)
+        .handshake(stream)
+        .await
+        .unwrap();
     compio_runtime::spawn(async move {
         if let Err(e) = conn.run().await {
             eprintln!("client connection error: {e}");
